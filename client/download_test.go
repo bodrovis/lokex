@@ -2,15 +2,14 @@ package client_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	// "encoding/json"
-	// "fmt"
-	// "net/http"
+	"net/http"
 	"testing"
 
 	"github.com/bodrovis/lokex/client"
 	"github.com/bodrovis/lokex/utils"
-	// "github.com/jarcoal/httpmock"
+	"github.com/jarcoal/httpmock"
 )
 
 var (
@@ -25,23 +24,23 @@ func init() {
 }
 
 func TestDownloader_Download(t *testing.T) {
-	// httpmock.Activate()
-	// defer httpmock.DeactivateAndReset()
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
 
-	// stubBundleURL := "https://cdn.example.com/bundle.zip"
+	stubBundleURL := "https://cdn.example.com/bundle.zip"
 
-	// target := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/download", projectID)
+	target := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/download", projectID)
 
-	// respBody, _ := json.Marshal(map[string]string{
-	// 	"bundle_url": stubBundleURL,
-	// })
+	respBody, _ := json.Marshal(map[string]string{
+		"bundle_url": stubBundleURL,
+	})
 
-	// httpmock.RegisterResponder("POST", target, func(req *http.Request) (*http.Response, error) {
-	// 	if got := req.Header.Get("X-Api-Token"); got != token {
-	// 		t.Fatalf("missing/incorrect X-Api-Token: %q", got)
-	// 	}
-	// 	return httpmock.NewStringResponse(200, string(respBody)), nil
-	// })
+	httpmock.RegisterResponder("POST", target, func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("X-Api-Token"); got != token {
+			t.Fatalf("missing/incorrect X-Api-Token: %q", got)
+		}
+		return httpmock.NewStringResponse(200, string(respBody)), nil
+	})
 
 	downloader := client.NewDownloader(client.NewClient(token, projectID, nil))
 	bundleURL, err := downloader.Download(context.Background())
@@ -49,7 +48,7 @@ func TestDownloader_Download(t *testing.T) {
 		t.Fatalf("Download error: %v", err)
 	}
 	fmt.Println(bundleURL)
-	// if bundleURL != stubBundleURL {
-	// 	t.Fatalf("Expected URL %s, got %s", bundleURL, stubBundleURL)
-	// }
+	if bundleURL != stubBundleURL {
+		t.Fatalf("Expected URL %s, got %s", bundleURL, stubBundleURL)
+	}
 }
