@@ -69,7 +69,8 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 			return httpmock.NewStringResponse(200, `{"bundle_url":"https://cdn.example.com/bundle.zip"}`), nil
 		})
 
-		d := client.NewDownloader(client.NewClient(token, projectID, nil))
+		cli, _ := client.NewClient(token, projectID, nil)
+		d := client.NewDownloader(cli)
 		url, err := d.FetchBundle(context.Background(), "json", client.DownloadParams{
 			"async":        true,
 			"include_tags": []string{"one", "two"},
@@ -89,7 +90,8 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 
 		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(200, `{"bundle_url":""}`))
 
-		d := client.NewDownloader(client.NewClient(token, projectID, nil))
+		cli, _ := client.NewClient(token, projectID, nil)
+		d := client.NewDownloader(cli)
 		_, err := d.FetchBundle(context.Background(), "json", nil)
 		if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
 			t.Fatalf("want empty bundle url error, got %v", err)
@@ -103,10 +105,10 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		body := `{"error":{"message":"rate limit","code":429,"details":{"bucket":"global"}}}`
 		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(429, body))
 
-		cli := client.NewClient(token, projectID, &client.ClientOptions{
-			InitialBackoff: 1 * time.Millisecond,
-			MaxBackoff:     5 * time.Millisecond,
-		})
+		cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+			1*time.Millisecond,
+			5*time.Millisecond,
+		))
 		d := client.NewDownloader(cli)
 		_, err := d.FetchBundle(context.Background(), "json", nil)
 		if err == nil {
@@ -127,7 +129,8 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 
 		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(200, `{"bundle_url":42`)) // broken
 
-		d := client.NewDownloader(client.NewClient(token, projectID, nil))
+		cli, _ := client.NewClient(token, projectID, nil)
+		d := client.NewDownloader(cli)
 		_, err := d.FetchBundle(context.Background(), "json", nil)
 		if err == nil || !strings.Contains(err.Error(), "decode response") {
 			t.Fatalf("want decode response error, got %v", err)
@@ -142,10 +145,10 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 			return nil, context.DeadlineExceeded
 		})
 
-		cli := client.NewClient(token, projectID, &client.ClientOptions{
-			InitialBackoff: 1 * time.Millisecond,
-			MaxBackoff:     5 * time.Millisecond,
-		})
+		cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+			1*time.Millisecond,
+			5*time.Millisecond,
+		))
 		d := client.NewDownloader(cli)
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
@@ -161,8 +164,8 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		// no responder needed; we should fail before making a request
-		d := client.NewDownloader(client.NewClient(token, projectID, nil))
+		cli, _ := client.NewClient(token, projectID, nil)
+		d := client.NewDownloader(cli)
 		_, err := d.FetchBundle(context.Background(), "", nil)
 		if err == nil || !strings.Contains(err.Error(), "format is required") {
 			t.Fatalf("want format is required error, got %v", err)
@@ -185,7 +188,7 @@ func TestDownloadAndUnzip_Happy(t *testing.T) {
 	bundleURL := "https://cdn.example.com/bundle.zip"
 	registerZipResponder(t, bundleURL, zb)
 
-	cli := client.NewClient(token, projectID, nil)
+	cli, _ := client.NewClient(token, projectID, nil)
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -225,7 +228,7 @@ func TestDownloadAndUnzip_ZipSlipBlocked(t *testing.T) {
 	bundleURL := "https://cdn.example.com/evil.zip"
 	registerZipResponder(t, bundleURL, zb)
 
-	cli := client.NewClient(token, projectID, nil)
+	cli, _ := client.NewClient(token, projectID, nil)
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -255,7 +258,7 @@ func TestDownloadAndUnzip_SymlinkEntry_Skipped(t *testing.T) {
 	bundleURL := "https://cdn.example.com/with-symlink.zip"
 	registerZipResponder(t, bundleURL, zb)
 
-	cli := client.NewClient(token, projectID, nil)
+	cli, _ := client.NewClient(token, projectID, nil)
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -287,10 +290,10 @@ func TestDownloadAndUnzip_HTTPNon2xx(t *testing.T) {
 	url := "https://cdn.example.com/notfound.zip"
 	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(404, "nope"))
 
-	cli := client.NewClient(token, projectID, &client.ClientOptions{
-		InitialBackoff: 1 * time.Millisecond,
-		MaxBackoff:     5 * time.Millisecond,
-	})
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		1*time.Millisecond,
+		5*time.Millisecond,
+	))
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -333,10 +336,10 @@ func TestDownloadAndUnzip_RetryOn5xxThenSuccess(t *testing.T) {
 		return httpmock.NewBytesResponse(200, zb), nil
 	})
 
-	cli := client.NewClient(token, projectID, &client.ClientOptions{
-		InitialBackoff: 1 * time.Millisecond,
-		MaxBackoff:     5 * time.Millisecond,
-	})
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		1*time.Millisecond,
+		5*time.Millisecond,
+	))
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -367,10 +370,10 @@ func TestDownloadAndUnzip_RetryStopsAtMax(t *testing.T) {
 	url := "https://cdn.example.com/down.zip"
 	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(500, "boom"))
 
-	cli := client.NewClient(token, projectID, &client.ClientOptions{
-		InitialBackoff: 1 * time.Millisecond,
-		MaxBackoff:     5 * time.Millisecond,
-	})
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		1*time.Millisecond,
+		5*time.Millisecond,
+	))
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -402,10 +405,10 @@ func TestDownloadAndUnzip_BackoffCanceledByContext(t *testing.T) {
 	url := "https://cdn.example.com/flaky-cancel.zip"
 	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(500, "boom"))
 
-	cli := client.NewClient(token, projectID, &client.ClientOptions{
-		InitialBackoff: 50 * time.Millisecond,
-		MaxBackoff:     100 * time.Millisecond,
-	})
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		50*time.Millisecond,
+		100*time.Millisecond,
+	))
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -437,10 +440,10 @@ func TestDownloadAndUnzip_ContextCanceled(t *testing.T) {
 		return nil, context.Canceled
 	})
 
-	cli := client.NewClient(token, projectID, &client.ClientOptions{
-		InitialBackoff: 1 * time.Millisecond,
-		MaxBackoff:     5 * time.Millisecond,
-	})
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		1*time.Millisecond,
+		5*time.Millisecond,
+	))
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -508,7 +511,8 @@ func TestIntegration_Download(t *testing.T) {
 		t.Skip("skipping integration test in -short mode")
 	}
 
-	d := client.NewDownloader(client.NewClient(token, projectID, nil))
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

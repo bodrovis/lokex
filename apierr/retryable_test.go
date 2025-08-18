@@ -104,21 +104,6 @@ func TestIsRetryable_APIStatuses(t *testing.T) {
 	}
 }
 
-func TestIsRateLimited(t *testing.T) {
-	err429 := &apierr.APIError{Status: http.StatusTooManyRequests, Message: "rate limited"}
-	if !apierr.IsRateLimited(err429) {
-		t.Fatalf("IsRateLimited(429) = false, want true")
-	}
-	if !apierr.IsRateLimited(fmt.Errorf("wrap: %w", err429)) {
-		t.Fatalf("IsRateLimited(wrapped 429) = false, want true")
-	}
-
-	other := &apierr.APIError{Status: http.StatusServiceUnavailable}
-	if apierr.IsRateLimited(other) {
-		t.Fatalf("IsRateLimited(503) = true, want false")
-	}
-}
-
 func TestIsRetryable_RealNetTimeoutSatisfies(t *testing.T) {
 	// net.Dialer with tiny timeout triggers a Timeout() error on no-route addr.
 	d := net.Dialer{Timeout: 1 * time.Nanosecond}

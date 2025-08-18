@@ -3,6 +3,7 @@ package apierr
 import (
 	"context"
 	"errors"
+	"io"
 	"math/rand"
 	"net/http"
 	"time"
@@ -20,11 +21,16 @@ func IsRetryable(err error) bool {
 		return true
 	}
 
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
+	}
+
 	// server returned non-2xx
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.Status {
-		case http.StatusTooManyRequests, // 429
+		case http.StatusRequestTimeout, // 408
+			http.StatusTooManyRequests,     // 429
 			http.StatusInternalServerError, // 500
 			http.StatusBadGateway,          // 502
 			http.StatusServiceUnavailable,  // 503
@@ -33,12 +39,6 @@ func IsRetryable(err error) bool {
 		}
 	}
 	return false
-}
-
-// IsRateLimited specifically checks 429.
-func IsRateLimited(err error) bool {
-	var apiErr *APIError
-	return errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests
 }
 
 func JitteredBackoff(base time.Duration) time.Duration {

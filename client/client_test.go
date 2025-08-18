@@ -10,7 +10,11 @@ func TestNewClient_DefaultBaseURL(t *testing.T) {
 	token := "tok123"
 	projectID := "proj456"
 
-	c := client.NewClient(token, projectID, nil)
+	c, err := client.NewClient(token, projectID, nil)
+
+	if err != nil {
+		t.Fatalf("Cannot create client")
+	}
 
 	if c.Token != token {
 		t.Fatalf("Token = %q, want %q", c.Token, token)
@@ -28,9 +32,13 @@ func TestNewClient_CustomBaseURL(t *testing.T) {
 	projectID := "proj456"
 	customBase := "https://custom.lokalise.test/api2/"
 
-	c := client.NewClient(token, projectID, &client.ClientOptions{
-		BaseURL: customBase,
-	})
+	c, err := client.NewClient(token, projectID, client.WithBaseURL(
+		customBase,
+	))
+
+	if err != nil {
+		t.Fatalf("Cannot create client")
+	}
 
 	if c.BaseURL != customBase {
 		t.Fatalf("BaseURL = %q, want %q", c.BaseURL, customBase)

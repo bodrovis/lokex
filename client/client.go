@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/bodrovis/lokex/apierr"
@@ -35,40 +38,121 @@ type Client struct {
 type ClientOptions struct {
 	BaseURL            string
 	HTTPClient         *http.Client
+	HTTPTimeout        time.Duration
 	MaxDownloadRetries int
 	InitialBackoff     time.Duration
 	MaxBackoff         time.Duration
 }
 
-func NewClient(token, projectID string, opts *ClientOptions) *Client {
-	baseURL := defaultBaseURL
-	if opts != nil && opts.BaseURL != "" {
-		baseURL = opts.BaseURL
+// Option applies a customization to Client.
+type Option func(*Client) error
+
+func WithBaseURL(u string) Option {
+	return func(c *Client) error {
+		u = strings.TrimSpace(u)
+		if u == "" {
+			return errors.New("base URL cannot be empty")
+		}
+		parsed, err := url.Parse(u)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return errors.New("invalid base URL")
+		}
+		// normalize: ensure trailing slash and keep path/joining sane
+		if !strings.HasSuffix(parsed.Path, "/") {
+			parsed.Path = parsed.Path + "/"
+		}
+		c.BaseURL = parsed.String()
+		return nil
 	}
-	if baseURL[len(baseURL)-1] != '/' {
-		baseURL += "/"
+}
+
+func WithUserAgent(ua string) Option {
+	return func(c *Client) error {
+		ua = strings.TrimSpace(ua)
+		if ua != "" {
+			c.UserAgent = ua
+		}
+		return nil
+	}
+}
+
+func WithHTTPClient(hc *http.Client) Option {
+	return func(c *Client) error {
+		if hc == nil {
+			return errors.New("http client cannot be nil")
+		}
+		c.HTTPClient = hc
+		return nil
+	}
+}
+
+func WithHTTPTimeout(d time.Duration) Option {
+	return func(c *Client) error {
+		// zero is allowed: means “no timeout” in http.Client semantics
+		if c.HTTPClient == nil {
+			c.HTTPClient = &http.Client{Timeout: d}
+			return nil
+		}
+		c.HTTPClient.Timeout = d
+		return nil
+	}
+}
+
+func WithMaxDownloadRetries(n int) Option {
+	return func(c *Client) error {
+		// allow 0 or negative on purpose if caller wants to disable
+		c.MaxDownloadRetries = n
+		return nil
+	}
+}
+
+func WithBackoff(initial, max time.Duration) Option {
+	return func(c *Client) error {
+		// allow zero durations if caller wants to kill backoff
+		c.InitialBackoff = initial
+		c.MaxBackoff = max
+		return nil
+	}
+}
+
+// NewClient builds a client with defaults, then applies options.
+// Zero values from options are treated as *explicit* values, not “unset”.
+func NewClient(token, projectID string, opts ...Option) (*Client, error) {
+	token = strings.TrimSpace(token)
+	projectID = strings.TrimSpace(projectID)
+	if token == "" {
+		return nil, errors.New("token is required")
+	}
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
 	}
 
 	c := &Client{
-		BaseURL:    baseURL,
-		Token:      token,
-		ProjectID:  projectID,
-		UserAgent:  defaultUserAgent,
-		HTTPClient: http.DefaultClient,
+		BaseURL:            defaultBaseURL,
+		Token:              token,
+		ProjectID:          projectID,
+		UserAgent:          defaultUserAgent,
+		HTTPClient:         &http.Client{Timeout: 30 * time.Second},
+		MaxDownloadRetries: defaultMaxRetries,
+		InitialBackoff:     defaultInitialBackoff,
+		MaxBackoff:         defaultMaxBackoff,
 	}
 
-	if opts != nil && opts.HTTPClient != nil {
-		c.HTTPClient = opts.HTTPClient
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt(c); err != nil {
+			return nil, err
+		}
 	}
 
-	// apply retry options if provided
-	if opts != nil {
-		c.MaxDownloadRetries = opts.MaxDownloadRetries
-		c.InitialBackoff = opts.InitialBackoff
-		c.MaxBackoff = opts.MaxBackoff
+	// final normalization
+	if !strings.HasSuffix(c.BaseURL, "/") {
+		c.BaseURL += "/"
 	}
-	c.normalizeRetryDefaults()
-	return c
+
+	return c, nil
 }
 
 // do sends the request, returns non-2xx as *APIError, and optionally decodes JSON into v.
@@ -187,14 +271,9 @@ func (c *Client) projectPath(suffix string) string {
 	return fmt.Sprintf("projects/%s/%s", c.ProjectID, suffix)
 }
 
-func (c *Client) normalizeRetryDefaults() {
-	if c.MaxDownloadRetries <= 0 {
-		c.MaxDownloadRetries = defaultMaxRetries
+func min(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
 	}
-	if c.InitialBackoff <= 0 {
-		c.InitialBackoff = defaultInitialBackoff
-	}
-	if c.MaxBackoff <= 0 {
-		c.MaxBackoff = defaultMaxBackoff
-	}
+	return b
 }
