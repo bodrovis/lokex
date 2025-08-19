@@ -1,10 +1,12 @@
-package utils
+package testutils_test
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bodrovis/lokex/testutils"
 )
 
 func TestFindProjectRoot_UsesGoMod(t *testing.T) {
@@ -20,7 +22,7 @@ func TestFindProjectRoot_UsesGoMod(t *testing.T) {
 		t.Fatalf("mkdirs: %v", err)
 	}
 
-	got, err := FindProjectRoot(nested)
+	got, err := testutils.FindProjectRoot(nested)
 	if err != nil {
 		t.Fatalf("FindProjectRoot: %v", err)
 	}
@@ -40,7 +42,7 @@ func TestLoadDotEnv_ExplicitPath(t *testing.T) {
 		t.Fatalf("%s unexpectedly set", key)
 	}
 
-	if err := LoadDotEnv(p); err != nil {
+	if err := testutils.LoadDotEnv(p); err != nil {
 		t.Fatalf("LoadDotEnv(explicit): %v", err)
 	}
 	if got := os.Getenv(key); got != val {
@@ -55,7 +57,7 @@ func TestLoadDotEnv_FromCWD(t *testing.T) {
 	writeDotEnv(t, tmp, map[string]string{key: val})
 	chdir(t, tmp)
 
-	if err := LoadDotEnv(); err != nil {
+	if err := testutils.LoadDotEnv(); err != nil {
 		t.Fatalf("LoadDotEnv(CWD): %v", err)
 	}
 	if got := os.Getenv(key); got != val {
@@ -80,7 +82,7 @@ func TestLoadDotEnv_FromProjectRoot(t *testing.T) {
 	}
 	chdir(t, nested)
 
-	if err := LoadDotEnv(); err != nil {
+	if err := testutils.LoadDotEnv(); err != nil {
 		t.Fatalf("LoadDotEnv(project root): %v", err)
 	}
 	if got := os.Getenv(key); got != val {
@@ -97,7 +99,7 @@ func TestLoadDotEnv_DoesNotOverrideExisting(t *testing.T) {
 	// pre-set should win; godotenv.Load doesn't override by default
 	t.Setenv(key, "preset")
 
-	if err := LoadDotEnv(); err != nil {
+	if err := testutils.LoadDotEnv(); err != nil {
 		t.Fatalf("LoadDotEnv: %v", err)
 	}
 	if got := os.Getenv(key); got != "preset" {
@@ -111,13 +113,13 @@ func TestGetEnv(t *testing.T) {
 	want := "set"
 
 	// when not set -> default
-	if got := GetEnv(key, def); got != def {
+	if got := testutils.GetEnv(key, def); got != def {
 		t.Fatalf("GetEnv when unset: got %q; want %q", got, def)
 	}
 
 	// when set -> returns set value
 	t.Setenv(key, want)
-	if got := GetEnv(key, def); got != want {
+	if got := testutils.GetEnv(key, def); got != want {
 		t.Fatalf("GetEnv when set: got %q; want %q", got, want)
 	}
 }

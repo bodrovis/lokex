@@ -18,6 +18,7 @@ import (
 
 	"github.com/bodrovis/lokex/apierr"
 	"github.com/bodrovis/lokex/client"
+	"github.com/bodrovis/lokex/testutils"
 	"github.com/bodrovis/lokex/utils"
 	"github.com/jarcoal/httpmock"
 )
@@ -28,11 +29,11 @@ var (
 )
 
 func init() {
-	if err := utils.LoadDotEnv(); err != nil {
+	if err := testutils.LoadDotEnv(); err != nil {
 		log.Printf("warning: could not load .env: %v", err)
 	}
-	token = utils.GetEnv("LOKALISE_API_TOKEN", "secret")
-	projectID = utils.GetEnv("LOKALISE_PROJECT_ID", "123.abc")
+	token = testutils.GetEnv("LOKALISE_API_TOKEN", "secret")
+	projectID = testutils.GetEnv("LOKALISE_PROJECT_ID", "123.abc")
 }
 
 func TestDownloader_FetchBundle_Variants(t *testing.T) {
