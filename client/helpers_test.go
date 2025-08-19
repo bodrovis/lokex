@@ -1,4 +1,4 @@
-package testutils
+package client_test
 
 import (
 	"os"
