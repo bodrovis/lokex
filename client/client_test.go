@@ -11,7 +11,6 @@ func TestNewClient_DefaultBaseURL(t *testing.T) {
 	projectID := "proj456"
 
 	c, err := client.NewClient(token, projectID, nil)
-
 	if err != nil {
 		t.Fatalf("Cannot create client")
 	}
@@ -35,7 +34,6 @@ func TestNewClient_CustomBaseURL(t *testing.T) {
 	c, err := client.NewClient(token, projectID, client.WithBaseURL(
 		customBase,
 	))
-
 	if err != nil {
 		t.Fatalf("Cannot create client")
 	}

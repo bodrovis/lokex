@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,7 +28,9 @@ var (
 )
 
 func init() {
-	utils.LoadDotEnv()
+	if err := utils.LoadDotEnv(); err != nil {
+		log.Printf("warning: could not load .env: %v", err)
+	}
 	token = utils.GetEnv("LOKALISE_API_TOKEN", "secret")
 	projectID = utils.GetEnv("LOKALISE_PROJECT_ID", "123.abc")
 }
@@ -52,30 +55,42 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 			if ct := req.Header.Get("Content-Type"); ct != "application/json" {
 				t.Fatalf("Content-Type = %q, want application/json", ct)
 			}
+
 			var got map[string]any
 			if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
 				t.Fatalf("decode req: %v", err)
 			}
+
 			if got["format"] != "json" {
 				t.Fatalf("format = %v, want json", got["format"])
-			}
-			if got["async"] != true {
-				t.Fatalf("async missing/false: %#v", got["async"])
 			}
 			tags, ok := got["include_tags"].([]any)
 			if !ok || len(tags) != 2 || tags[0] != "one" || tags[1] != "two" {
 				t.Fatalf("include_tags wrong: %#v", got["include_tags"])
 			}
+
 			return httpmock.NewStringResponse(200, `{"bundle_url":"https://cdn.example.com/bundle.zip"}`), nil
 		})
 
-		cli, _ := client.NewClient(token, projectID, nil)
+		cli, err := client.NewClient(token, projectID, client.WithHTTPTimeout(3*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
 		d := client.NewDownloader(cli)
-		url, err := d.FetchBundle(context.Background(), "json", client.DownloadParams{
-			"async":        true,
+
+		body := map[string]any{
 			"include_tags": []string{"one", "two"},
-			"format":       "xml", // should be ignored/overridden
-		})
+			"format":       "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		url, err := d.FetchBundle(ctx, buf)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -90,9 +105,21 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 
 		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(200, `{"bundle_url":""}`))
 
-		cli, _ := client.NewClient(token, projectID, nil)
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		d := client.NewDownloader(cli)
-		_, err := d.FetchBundle(context.Background(), "json", nil)
+
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		_, err = d.FetchBundle(context.Background(), buf)
 		if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
 			t.Fatalf("want empty bundle url error, got %v", err)
 		}
@@ -102,15 +129,28 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		body := `{"error":{"message":"rate limit","code":429,"details":{"bucket":"global"}}}`
-		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(429, body))
+		respBody := `{"error":{"message":"rate limit","code":429,"details":{"bucket":"global"}}}`
+		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(429, respBody))
 
-		cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		cli, err := client.NewClient(token, projectID, client.WithBackoff(
 			1*time.Millisecond,
 			5*time.Millisecond,
 		))
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		d := client.NewDownloader(cli)
-		_, err := d.FetchBundle(context.Background(), "json", nil)
+
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		_, err = d.FetchBundle(context.Background(), buf)
 		if err == nil {
 			t.Fatal("expected error, got nil")
 		}
@@ -129,10 +169,28 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 
 		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(200, `{"bundle_url":42`)) // broken
 
-		cli, _ := client.NewClient(token, projectID, nil)
+		cli, err := client.NewClient(
+			token,
+			projectID,
+			// unexpected EOF is actually retryable but no need to retry here
+			client.WithMaxDownloadRetries(0),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		d := client.NewDownloader(cli)
-		_, err := d.FetchBundle(context.Background(), "json", nil)
-		if err == nil || !strings.Contains(err.Error(), "decode response") {
+
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		_, err = d.FetchBundle(context.Background(), buf)
+		if err == nil || !strings.Contains(err.Error(), "decode response: unexpected EOF") {
 			t.Fatalf("want decode response error, got %v", err)
 		}
 	})
@@ -145,30 +203,30 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 			return nil, context.DeadlineExceeded
 		})
 
-		cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+		cli, err := client.NewClient(token, projectID, client.WithBackoff(
 			1*time.Millisecond,
 			5*time.Millisecond,
 		))
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		d := client.NewDownloader(cli)
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 		defer cancel()
 
-		_, err := d.FetchBundle(ctx, "json", nil)
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		_, err = d.FetchBundle(ctx, buf)
 		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("want DeadlineExceeded, got %v", err)
-		}
-	})
-
-	t.Run("missing format -> immediate error (no HTTP)", func(t *testing.T) {
-		httpmock.Activate()
-		defer httpmock.DeactivateAndReset()
-
-		cli, _ := client.NewClient(token, projectID, nil)
-		d := client.NewDownloader(cli)
-		_, err := d.FetchBundle(context.Background(), "", nil)
-		if err == nil || !strings.Contains(err.Error(), "format is required") {
-			t.Fatalf("want format is required error, got %v", err)
 		}
 	})
 }
@@ -188,7 +246,11 @@ func TestDownloadAndUnzip_Happy(t *testing.T) {
 	bundleURL := "https://cdn.example.com/bundle.zip"
 	registerZipResponder(t, bundleURL, zb)
 
-	cli, _ := client.NewClient(token, projectID, nil)
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -228,11 +290,15 @@ func TestDownloadAndUnzip_ZipSlipBlocked(t *testing.T) {
 	bundleURL := "https://cdn.example.com/evil.zip"
 	registerZipResponder(t, bundleURL, zb)
 
-	cli, _ := client.NewClient(token, projectID, nil)
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
-	err := dl.DownloadAndUnzip(context.Background(), bundleURL, dest)
+	err = dl.DownloadAndUnzip(context.Background(), bundleURL, dest)
 	if err == nil || !strings.Contains(err.Error(), "unsafe path") {
 		t.Fatalf("want unsafe path error, got %v", err)
 	}
@@ -258,7 +324,11 @@ func TestDownloadAndUnzip_SymlinkEntry_Skipped(t *testing.T) {
 	bundleURL := "https://cdn.example.com/with-symlink.zip"
 	registerZipResponder(t, bundleURL, zb)
 
-	cli, _ := client.NewClient(token, projectID, nil)
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -290,14 +360,18 @@ func TestDownloadAndUnzip_HTTPNon2xx(t *testing.T) {
 	url := "https://cdn.example.com/notfound.zip"
 	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(404, "nope"))
 
-	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+	cli, err := client.NewClient(token, projectID, client.WithBackoff(
 		1*time.Millisecond,
 		5*time.Millisecond,
 	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
-	err := dl.DownloadAndUnzip(context.Background(), url, dest)
+	err = dl.DownloadAndUnzip(context.Background(), url, dest)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -336,10 +410,14 @@ func TestDownloadAndUnzip_RetryOn5xxThenSuccess(t *testing.T) {
 		return httpmock.NewBytesResponse(200, zb), nil
 	})
 
-	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+	cli, err := client.NewClient(token, projectID, client.WithBackoff(
 		1*time.Millisecond,
 		5*time.Millisecond,
 	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -370,14 +448,18 @@ func TestDownloadAndUnzip_RetryStopsAtMax(t *testing.T) {
 	url := "https://cdn.example.com/down.zip"
 	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(500, "boom"))
 
-	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+	cli, err := client.NewClient(token, projectID, client.WithBackoff(
 		1*time.Millisecond,
 		5*time.Millisecond,
 	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
-	err := dl.DownloadAndUnzip(context.Background(), url, dest)
+	err = dl.DownloadAndUnzip(context.Background(), url, dest)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -405,10 +487,14 @@ func TestDownloadAndUnzip_BackoffCanceledByContext(t *testing.T) {
 	url := "https://cdn.example.com/flaky-cancel.zip"
 	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(500, "boom"))
 
-	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+	cli, err := client.NewClient(token, projectID, client.WithBackoff(
 		50*time.Millisecond,
 		100*time.Millisecond,
 	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
@@ -419,7 +505,7 @@ func TestDownloadAndUnzip_BackoffCanceledByContext(t *testing.T) {
 		cancel()
 	}()
 
-	err := dl.DownloadAndUnzip(ctx, url, dest)
+	err = dl.DownloadAndUnzip(ctx, url, dest)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context canceled, got %v", err)
 	}
@@ -440,14 +526,18 @@ func TestDownloadAndUnzip_ContextCanceled(t *testing.T) {
 		return nil, context.Canceled
 	})
 
-	cli, _ := client.NewClient(token, projectID, client.WithBackoff(
+	cli, err := client.NewClient(token, projectID, client.WithBackoff(
 		1*time.Millisecond,
 		5*time.Millisecond,
 	))
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dl := client.NewDownloader(cli)
 
 	dest := t.TempDir()
-	err := dl.DownloadAndUnzip(context.Background(), url, dest)
+	err = dl.DownloadAndUnzip(context.Background(), url, dest)
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context canceled, got %v", err)
 	}
@@ -511,7 +601,11 @@ func TestIntegration_Download(t *testing.T) {
 		t.Skip("skipping integration test in -short mode")
 	}
 
-	cli, _ := client.NewClient(token, projectID, nil)
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	d := client.NewDownloader(cli)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -519,13 +613,13 @@ func TestIntegration_Download(t *testing.T) {
 
 	localesDir := filepath.Join("./", "locales")
 
-	url, err := d.Download(ctx, localesDir, "json", client.DownloadParams{
-		"async": false,
+	url, err := d.Download(ctx, localesDir, client.DownloadParams{
+		"format": "json",
 	})
 	if err != nil {
 		t.Fatalf("integration request failed: %v", err)
 	}
-	if !strings.HasPrefix(url, "https://s3.eu-central-1.amazonaws.com") {
+	if !strings.HasPrefix(url, "https://") {
 		t.Fatalf("unexpected bundle URL: %q", url)
 	}
 
@@ -552,4 +646,171 @@ func TestIntegration_Download(t *testing.T) {
 	if !foundFile {
 		t.Fatalf("no files found under locales dir (only directories present)")
 	}
+}
+
+func TestIntegration_DownloadAsync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in -short mode")
+	}
+
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := client.NewDownloader(cli)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	localesDir := filepath.Join("./", "locales-async")
+
+	url, err := d.Download(ctx, localesDir, client.DownloadParams{
+		"async":  true,
+		"format": "json",
+	})
+	if err != nil {
+		t.Fatalf("integration request failed: %v", err)
+	}
+	if !strings.HasPrefix(url, "https://") {
+		t.Fatalf("unexpected bundle URL: %q", url)
+	}
+
+	// 1) locales exists and is not empty
+	entries, err := os.ReadDir(localesDir)
+	if err != nil {
+		t.Fatalf("cannot read locales dir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("locales dir is empty")
+	}
+
+	// 2) recursively ensure at least one regular file exists
+	foundFile := false
+	err = filepath.WalkDir(localesDir, func(path string, d os.DirEntry, _ error) error {
+		if !d.IsDir() {
+			foundFile = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk locales dir: %v", err)
+	}
+	if !foundFile {
+		t.Fatalf("no files found under locales dir (only directories present)")
+	}
+}
+
+func TestDownloader_FetchBundleAsync(t *testing.T) {
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/async-download", projectID)
+	targetGet := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/processes/xyz", projectID)
+
+	t.Run("happy path async", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		// async kickoff
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+
+		// process poller: return finished with download_url
+		httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+			"process": {
+				"process_id":"xyz",
+				"status":"finished",
+				"details": {"download_url":"https://cdn.example.com/async-bundle.zip"}
+			}
+		}`))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := client.NewDownloader(cli)
+
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		url, err := d.FetchBundleAsync(context.Background(), buf)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if url != "https://cdn.example.com/async-bundle.zip" {
+			t.Fatalf("url=%q, want bundle url", url)
+		}
+	})
+
+	t.Run("failed process", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+
+		// first poll -> failed
+		httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+			"process": {"process_id":"xyz","status":"failed"}
+		}`))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := client.NewDownloader(cli)
+
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		_, err = d.FetchBundleAsync(context.Background(), buf)
+		if err == nil || !strings.Contains(err.Error(), "failed") {
+			t.Fatalf("want failed error, got %v", err)
+		}
+	})
+
+	t.Run("timeout", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+
+		// always queued, never finishes
+		httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+			"process": {"process_id":"xyz","status":"queued"}
+		}`))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := client.NewDownloader(cli)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+
+		body := map[string]any{
+			"format": "json",
+		}
+		buf, err := utils.EncodeJSONBody(body)
+		if err != nil {
+			t.Fatalf("cannot encode body")
+		}
+
+		_, err = d.FetchBundleAsync(ctx, buf)
+		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("want context deadline, got %v", err)
+		}
+	})
 }

@@ -16,12 +16,15 @@ import (
 )
 
 const (
-	defaultBaseURL        = "https://api.lokalise.com/api2/"
-	defaultUserAgent      = "lokex/0.1"
-	defaultErrCap         = 8192
-	defaultMaxRetries     = 3
-	defaultInitialBackoff = 400 * time.Millisecond
-	defaultMaxBackoff     = 5 * time.Second
+	defaultBaseURL         = "https://api.lokalise.com/api2/"
+	defaultUserAgent       = "lokex/0.1"
+	defaultErrCap          = 8192
+	defaultMaxRetries      = 3
+	defaultInitialBackoff  = 400 * time.Millisecond
+	defaultMaxBackoff      = 5 * time.Second
+	defaultHTTPTimeout     = 30 * time.Second
+	defaultPollInitialWait = 1 * time.Second
+	defaultPollMaxWait     = 120 * time.Second
 )
 
 type Client struct {
@@ -33,6 +36,8 @@ type Client struct {
 	MaxDownloadRetries int
 	InitialBackoff     time.Duration
 	MaxBackoff         time.Duration
+	PollInitialWait    time.Duration
+	PollMaxWait        time.Duration
 }
 
 type ClientOptions struct {
@@ -42,6 +47,33 @@ type ClientOptions struct {
 	MaxDownloadRetries int
 	InitialBackoff     time.Duration
 	MaxBackoff         time.Duration
+	PollInitialWait    time.Duration
+	PollMaxWait        time.Duration
+}
+
+type QueuedProcess struct {
+	ProcessID   string `json:"process_id"`
+	Status      string `json:"status"`
+	DownloadURL string `json:"download_url,omitempty"`
+}
+
+type processResponse struct {
+	Process struct {
+		ProcessID string `json:"process_id"`
+		Status    string `json:"status"`
+		Message   string `json:"message"`
+		Details   struct {
+			DownloadURL string `json:"download_url"`
+		} `json:"details"`
+	} `json:"process"`
+}
+
+func (pr *processResponse) ToQueuedProcess() QueuedProcess {
+	return QueuedProcess{
+		ProcessID:   pr.Process.ProcessID,
+		Status:      pr.Process.Status,
+		DownloadURL: pr.Process.Details.DownloadURL,
+	}
 }
 
 // Option applies a customization to Client.
@@ -88,10 +120,8 @@ func WithHTTPClient(hc *http.Client) Option {
 
 func WithHTTPTimeout(d time.Duration) Option {
 	return func(c *Client) error {
-		// zero is allowed: means “no timeout” in http.Client semantics
 		if c.HTTPClient == nil {
-			c.HTTPClient = &http.Client{Timeout: d}
-			return nil
+			c.HTTPClient = &http.Client{}
 		}
 		c.HTTPClient.Timeout = d
 		return nil
@@ -115,6 +145,23 @@ func WithBackoff(initial, max time.Duration) Option {
 	}
 }
 
+func WithPollWait(initial, max time.Duration) Option {
+	return func(c *Client) error {
+		if initial <= 0 {
+			initial = defaultPollInitialWait
+		}
+		if max <= 0 {
+			max = defaultPollMaxWait
+		}
+		if max < initial {
+			max = initial
+		}
+		c.PollInitialWait = initial
+		c.PollMaxWait = max
+		return nil
+	}
+}
+
 // NewClient builds a client with defaults, then applies options.
 // Zero values from options are treated as *explicit* values, not “unset”.
 func NewClient(token, projectID string, opts ...Option) (*Client, error) {
@@ -132,10 +179,12 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 		Token:              token,
 		ProjectID:          projectID,
 		UserAgent:          defaultUserAgent,
-		HTTPClient:         &http.Client{Timeout: 30 * time.Second},
+		HTTPClient:         &http.Client{Timeout: defaultHTTPTimeout},
 		MaxDownloadRetries: defaultMaxRetries,
 		InitialBackoff:     defaultInitialBackoff,
 		MaxBackoff:         defaultMaxBackoff,
+		PollInitialWait:    defaultPollInitialWait,
+		PollMaxWait:        defaultPollMaxWait,
 	}
 
 	for _, opt := range opts {
@@ -155,11 +204,71 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// do sends the request, returns non-2xx as *APIError, and optionally decodes JSON into v.
-func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader, v any) (*http.Response, error) {
-	url := c.BaseURL + path
+func (client *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
+	start := time.Now()
+	wait := client.PollInitialWait
+	maxWait := client.PollMaxWait
 
-	// If there's a body, buffer it so we can retry safely.
+	processMap := make(map[string]QueuedProcess, len(processIDs))
+	pending := make(map[string]struct{}, len(processIDs))
+
+	for _, id := range processIDs {
+		processMap[id] = QueuedProcess{ProcessID: id, Status: "queued"}
+		pending[id] = struct{}{}
+	}
+
+	for len(pending) > 0 && time.Since(start) < maxWait {
+		for id := range pending {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			default:
+			}
+
+			path := client.projectPath(fmt.Sprintf("processes/%s", id))
+			var resp processResponse
+
+			_, err := client.doRequest(ctx, http.MethodGet, path, nil, &resp)
+			if err != nil {
+				// just skip this round, will retry in next loop iteration
+				continue
+			}
+
+			proc := resp.ToQueuedProcess()
+			processMap[id] = proc
+
+			if proc.Status == "finished" || proc.Status == "failed" {
+				delete(pending, id)
+			}
+		}
+
+		if len(pending) == 0 {
+			break
+		}
+
+		// wait before next poll iteration
+		select {
+		case <-time.After(wait):
+			elapsed := time.Since(start)
+			wait = wait * 2
+			if wait > maxWait-elapsed {
+				wait = maxWait - elapsed
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// collect results
+	results := make([]QueuedProcess, 0, len(processMap))
+	for _, p := range processMap {
+		results = append(results, p)
+	}
+	return results, nil
+}
+
+func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader, v any) (*http.Response, error) {
+	// If body isn't rewindable, buffer it once here so retries are safe
 	var payload []byte
 	if body != nil {
 		b, err := io.ReadAll(body)
@@ -176,38 +285,9 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 			rdr = bytes.NewReader(payload)
 		}
 
-		req, err := http.NewRequestWithContext(ctx, method, url, rdr)
+		resp, err := c.doRequest(ctx, method, path, rdr, v)
 		if err != nil {
-			return fmt.Errorf("create request: %w", err)
-		}
-		req.Header.Set("X-Api-Token", c.Token)
-		req.Header.Set("User-Agent", c.UserAgent)
-		req.Header.Set("Accept", "application/json")
-		if rdr != nil {
-			req.Header.Set("Content-Type", "application/json")
-			req.ContentLength = int64(len(payload))
-		}
-
-		resp, err := c.HTTPClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("send request: %w", err)
-		}
-
-		// Non-2xx -> build *apierr.APIError so IsRetryable can decide (429/5xx)
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			defer resp.Body.Close()
-			slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
-			ae := apierr.Parse(slurp, resp.StatusCode)
-			ae.Resp = resp
-			return ae
-		}
-
-		// Success: decode JSON if asked; if not, hand the resp to caller (they close it).
-		if v != nil {
-			defer resp.Body.Close()
-			if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-				return fmt.Errorf("decode response: %w", err)
-			}
+			return err
 		}
 		outResp = resp
 		return nil
@@ -216,6 +296,54 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		return nil, err
 	}
 	return outResp, nil
+}
+
+// doRequest performs a single HTTP request, no retries.
+func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any) (*http.Response, error) {
+	url := c.BaseURL + path
+
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	req.Header.Set("X-Api-Token", c.Token)
+	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		// body may be non-rewindable, caller should handle if retries are needed
+		if seeker, ok := body.(io.Seeker); ok {
+			// safe: length from current pos to end
+			if size, err := seeker.Seek(0, io.SeekEnd); err == nil {
+				_, _ = seeker.Seek(0, io.SeekStart)
+				req.ContentLength = size
+			}
+		}
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
+		ae := apierr.Parse(slurp, resp.StatusCode)
+		ae.Resp = resp
+		return resp, ae
+	}
+
+	if v != nil {
+		if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
+			return resp, fmt.Errorf("decode response: %w", err)
+		}
+	}
+
+	return resp, nil
 }
 
 func (c *Client) withExpBackoff(
@@ -249,14 +377,20 @@ func (c *Client) withExpBackoff(
 		delay := apierr.JitteredBackoff(backoff)
 		delay = min(delay, c.MaxBackoff)
 
+		timer := time.NewTimer(delay)
 		select {
-		case <-time.After(delay):
+		case <-timer.C:
+			// wait for retry
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			if label != "" {
 				return fmt.Errorf("%s: context: %w", label, ctx.Err())
 			}
 			return ctx.Err()
 		}
+		timer.Stop() // safe call
 
 		// grow backoff, capped
 		backoff *= 2

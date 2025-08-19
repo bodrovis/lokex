@@ -2,17 +2,17 @@ package client
 
 import (
 	"archive/zip"
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/bodrovis/lokex/apierr"
+	"github.com/bodrovis/lokex/utils"
 )
 
 type Downloader struct {
@@ -21,6 +21,10 @@ type Downloader struct {
 type DownloadBundle struct {
 	BundleURL string `json:"bundle_url"`
 }
+type AsyncDownloadResponse struct {
+	ProcessID string `json:"process_id"`
+}
+
 type DownloadParams map[string]any
 
 func NewDownloader(c *Client) *Downloader {
@@ -29,46 +33,83 @@ func NewDownloader(c *Client) *Downloader {
 	}
 }
 
-func (d *Downloader) Download(ctx context.Context, unzipTo, format string, params DownloadParams) (string, error) {
-	bundle, err := d.FetchBundle(ctx, format, params)
+func (d *Downloader) Download(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
+	// detect async flag
+	async := false
+	if v, ok := params["async"]; ok {
+		if bv, ok := v.(bool); ok && bv {
+			async = true
+		}
+	}
+
+	body := make(map[string]any, len(params))
+	maps.Copy(body, params)
+	delete(body, "async")
+
+	var err error
+
+	buf, err := utils.EncodeJSONBody(body)
+	if err != nil {
+		return "", fmt.Errorf("download: %w", err)
+	}
+
+	var bundleURL string
+
+	if async {
+		bundleURL, err = d.FetchBundleAsync(ctx, buf)
+	} else {
+		bundleURL, err = d.FetchBundle(ctx, buf)
+	}
 	if err != nil {
 		return "", err
 	}
 
-	err = d.DownloadAndUnzip(ctx, bundle, unzipTo)
+	err = d.DownloadAndUnzip(ctx, bundleURL, unzipTo)
 	if err != nil {
 		return "", err
 	}
 
-	return bundle, nil
+	return bundleURL, nil
 }
 
-func (d *Downloader) FetchBundle(ctx context.Context, format string, params DownloadParams) (string, error) {
-	if strings.TrimSpace(format) == "" {
-		return "", fmt.Errorf("fetch bundle: format is required")
+func (d *Downloader) FetchBundleAsync(ctx context.Context, body io.Reader) (string, error) {
+	var resp AsyncDownloadResponse
+	path := d.client.projectPath("files/async-download")
+
+	_, err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &resp)
+	if err != nil {
+		return "", fmt.Errorf("fetch bundle async: %w", err)
+	}
+	if resp.ProcessID == "" {
+		return "", fmt.Errorf("fetch bundle async: empty process id")
 	}
 
-	body := make(map[string]any, 1+len(params))
-	body["format"] = format
-	for k, v := range params {
-		// don't let callers override the required field
-		if strings.EqualFold(k, "format") {
-			continue
-		}
-		body[k] = v
+	// Poll this single process until it finishes or times out
+	results, err := d.client.PollProcesses(ctx, []string{resp.ProcessID})
+	if err != nil {
+		return "", fmt.Errorf("fetch bundle async: poll processes: %w", err)
+	}
+	if len(results) == 0 {
+		return "", fmt.Errorf("fetch bundle async: no process results returned")
 	}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(body); err != nil {
-		return "", fmt.Errorf("fetch bundle: encode body: %w", err)
+	completed := results[0]
+	if completed.Status == "finished" && completed.DownloadURL != "" {
+		return completed.DownloadURL, nil
 	}
 
+	return "", fmt.Errorf(
+		"fetch bundle async: process %s did not finish (status=%s)",
+		completed.ProcessID,
+		completed.Status,
+	)
+}
+
+func (d *Downloader) FetchBundle(ctx context.Context, body io.Reader) (string, error) {
 	var bundle DownloadBundle
 	path := d.client.projectPath("files/download")
 
-	_, err := d.client.doWithRetry(ctx, http.MethodPost, path, &buf, &bundle)
+	_, err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &bundle)
 	if err != nil {
 		return "", fmt.Errorf("fetch bundle: %w", err)
 	}
@@ -128,7 +169,9 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 	if err != nil {
 		return fmt.Errorf("http get: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
@@ -143,7 +186,9 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 	if err != nil {
 		return fmt.Errorf("create temp zip: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		return fmt.Errorf("write zip: %w", err)
@@ -159,7 +204,9 @@ func unzipSafe(srcZip, destDir string) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer func() {
+		_ = r.Close()
+	}()
 
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
@@ -210,11 +257,15 @@ func unzipSafe(srcZip, destDir string) error {
 		}
 		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
 		if err != nil {
-			rc.Close()
+			defer func() {
+				_ = rc.Close()
+			}()
 			return err
 		}
 		_, copyErr := io.Copy(out, rc)
-		rc.Close()
+		defer func() {
+			_ = rc.Close()
+		}()
 		if cerr := out.Close(); copyErr == nil && cerr != nil {
 			copyErr = cerr
 		}
