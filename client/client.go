@@ -28,27 +28,16 @@ const (
 )
 
 type Client struct {
-	BaseURL            string
-	Token              string
-	ProjectID          string
-	UserAgent          string
-	HTTPClient         *http.Client
-	MaxDownloadRetries int
-	InitialBackoff     time.Duration
-	MaxBackoff         time.Duration
-	PollInitialWait    time.Duration
-	PollMaxWait        time.Duration
-}
-
-type ClientOptions struct {
-	BaseURL            string
-	HTTPClient         *http.Client
-	HTTPTimeout        time.Duration
-	MaxDownloadRetries int
-	InitialBackoff     time.Duration
-	MaxBackoff         time.Duration
-	PollInitialWait    time.Duration
-	PollMaxWait        time.Duration
+	BaseURL         string
+	Token           string
+	ProjectID       string
+	UserAgent       string
+	HTTPClient      *http.Client
+	MaxRetries      int
+	InitialBackoff  time.Duration
+	MaxBackoff      time.Duration
+	PollInitialWait time.Duration
+	PollMaxWait     time.Duration
 }
 
 type QueuedProcess struct {
@@ -128,17 +117,25 @@ func WithHTTPTimeout(d time.Duration) Option {
 	}
 }
 
-func WithMaxDownloadRetries(n int) Option {
+func WithMaxRetries(n int) Option {
 	return func(c *Client) error {
 		// allow 0 or negative on purpose if caller wants to disable
-		c.MaxDownloadRetries = n
+		c.MaxRetries = n
 		return nil
 	}
 }
 
 func WithBackoff(initial, max time.Duration) Option {
 	return func(c *Client) error {
-		// allow zero durations if caller wants to kill backoff
+		if initial <= 0 {
+			initial = defaultInitialBackoff
+		}
+		if max <= 0 {
+			max = defaultMaxBackoff
+		}
+		if max < initial {
+			max = initial
+		}
 		c.InitialBackoff = initial
 		c.MaxBackoff = max
 		return nil
@@ -175,16 +172,16 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	}
 
 	c := &Client{
-		BaseURL:            defaultBaseURL,
-		Token:              token,
-		ProjectID:          projectID,
-		UserAgent:          defaultUserAgent,
-		HTTPClient:         &http.Client{Timeout: defaultHTTPTimeout},
-		MaxDownloadRetries: defaultMaxRetries,
-		InitialBackoff:     defaultInitialBackoff,
-		MaxBackoff:         defaultMaxBackoff,
-		PollInitialWait:    defaultPollInitialWait,
-		PollMaxWait:        defaultPollMaxWait,
+		BaseURL:         defaultBaseURL,
+		Token:           token,
+		ProjectID:       projectID,
+		UserAgent:       defaultUserAgent,
+		HTTPClient:      &http.Client{Timeout: defaultHTTPTimeout},
+		MaxRetries:      defaultMaxRetries,
+		InitialBackoff:  defaultInitialBackoff,
+		MaxBackoff:      defaultMaxBackoff,
+		PollInitialWait: defaultPollInitialWait,
+		PollMaxWait:     defaultPollMaxWait,
 	}
 
 	for _, opt := range opts {
@@ -204,20 +201,51 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-func (client *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
+func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
 	start := time.Now()
-	wait := client.PollInitialWait
-	maxWait := client.PollMaxWait
+
+	// sane floors / symmetry with options
+	wait := c.PollInitialWait
+	if wait <= 0 {
+		wait = defaultPollInitialWait
+	}
+	maxWait := c.PollMaxWait
+	if maxWait <= 0 {
+		maxWait = defaultPollMaxWait
+	}
+	if maxWait < wait {
+		maxWait = wait
+	}
 
 	processMap := make(map[string]QueuedProcess, len(processIDs))
 	pending := make(map[string]struct{}, len(processIDs))
 
 	for _, id := range processIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
 		processMap[id] = QueuedProcess{ProcessID: id, Status: "queued"}
 		pending[id] = struct{}{}
 	}
 
-	for len(pending) > 0 && time.Since(start) < maxWait {
+	// nothing to do? return in caller-provided order
+	if len(pending) == 0 {
+		results := make([]QueuedProcess, 0, len(processIDs))
+		for _, id := range processIDs {
+			if p, ok := processMap[id]; ok {
+				results = append(results, p)
+			}
+		}
+		return results, nil
+	}
+
+	for len(pending) > 0 {
+		// respect overall max wait
+		if time.Since(start) >= maxWait {
+			break
+		}
+
 		for id := range pending {
 			select {
 			case <-ctx.Done():
@@ -225,12 +253,11 @@ func (client *Client) PollProcesses(ctx context.Context, processIDs []string) ([
 			default:
 			}
 
-			path := client.projectPath(fmt.Sprintf("processes/%s", id))
+			path := c.projectPath(fmt.Sprintf("processes/%s", id))
 			var resp processResponse
 
-			_, err := client.doRequest(ctx, http.MethodGet, path, nil, &resp)
-			if err != nil {
-				// just skip this round, will retry in next loop iteration
+			if err := c.doRequest(ctx, http.MethodGet, path, nil, &resp, nil); err != nil {
+				// skip this id for now; try again next loop
 				continue
 			}
 
@@ -246,85 +273,101 @@ func (client *Client) PollProcesses(ctx context.Context, processIDs []string) ([
 			break
 		}
 
-		// wait before next poll iteration
+		// compute a safe sleep that never goes negative/zero and never exceeds remaining budget
+		remaining := maxWait - time.Since(start)
+		if remaining <= 0 {
+			break
+		}
+		sleep := wait
+		if sleep > remaining {
+			sleep = remaining
+		}
+		if sleep <= 0 {
+			sleep = 10 * time.Millisecond // tiny floor to avoid spin
+		}
+
 		select {
-		case <-time.After(wait):
-			elapsed := time.Since(start)
-			wait = wait * 2
-			if wait > maxWait-elapsed {
-				wait = maxWait - elapsed
+		case <-time.After(sleep):
+			// grow next wait, clipped by what remains
+			remaining = maxWait - time.Since(start)
+			next := wait * 2
+			if next > remaining {
+				next = remaining
 			}
+			if next <= 0 {
+				next = 10 * time.Millisecond
+			}
+			wait = next
+
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
 	}
 
-	// collect results
-	results := make([]QueuedProcess, 0, len(processMap))
-	for _, p := range processMap {
-		results = append(results, p)
+	// preserve input order in results
+	results := make([]QueuedProcess, 0, len(processIDs))
+	for _, id := range processIDs {
+		if p, ok := processMap[id]; ok {
+			results = append(results, p)
+		}
 	}
 	return results, nil
 }
 
-func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader, v any) (*http.Response, error) {
+func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader, v any) error {
 	// If body isn't rewindable, buffer it once here so retries are safe
 	var payload []byte
 	if body != nil {
 		b, err := io.ReadAll(body)
 		if err != nil {
-			return nil, fmt.Errorf("buffer request body: %w", err)
+			return fmt.Errorf("buffer request body: %w", err)
 		}
 		payload = b
 	}
 
-	var outResp *http.Response
 	err := c.withExpBackoff(ctx, "request", func(_ int) error {
 		var rdr io.Reader
+		headers := make(http.Header)
+
 		if payload != nil {
 			rdr = bytes.NewReader(payload)
+			headers.Set("Content-Type", "application/json")
+			headers.Set("Content-Length", fmt.Sprintf("%d", len(payload)))
 		}
 
-		resp, err := c.doRequest(ctx, method, path, rdr, v)
+		err := c.doRequest(ctx, method, path, rdr, v, headers)
 		if err != nil {
 			return err
 		}
-		outResp = resp
 		return nil
 	}, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return outResp, nil
+	return nil
 }
 
 // doRequest performs a single HTTP request, no retries.
-func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any) (*http.Response, error) {
+func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any, headers http.Header) error {
 	url := c.BaseURL + path
 
 	req, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("X-Api-Token", c.Token)
 	req.Header.Set("User-Agent", c.UserAgent)
 	req.Header.Set("Accept", "application/json")
-	if body != nil {
-		// body may be non-rewindable, caller should handle if retries are needed
-		if seeker, ok := body.(io.Seeker); ok {
-			// safe: length from current pos to end
-			if size, err := seeker.Seek(0, io.SeekEnd); err == nil {
-				_, _ = seeker.Seek(0, io.SeekStart)
-				req.ContentLength = size
-			}
+	for k, vv := range headers {
+		for _, v := range vv {
+			req.Header.Add(k, v)
 		}
-		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+		return fmt.Errorf("send request: %w", err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -334,18 +377,38 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
 		ae := apierr.Parse(slurp, resp.StatusCode)
 		ae.Resp = resp
-		return resp, ae
+		return ae
 	}
 
-	if v != nil {
-		if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
-			return resp, fmt.Errorf("decode response: %w", err)
-		}
+	// No target to decode into → nothing else to do
+	if v == nil {
+		// drain body to let Go reuse the connection
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
 	}
 
-	return resp, nil
+	// Read full body once; classify empty vs truncated vs valid JSON
+	b, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		// If the server closed early (truncated body), bubble this up as-is so the
+		// retry layer can decide (we'll mark it retryable below).
+		return fmt.Errorf("read response: %w", rerr)
+	}
+
+	if len(bytes.TrimSpace(b)) == 0 {
+		// 204 or empty JSON body — treat as success
+		return nil
+	}
+
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	return nil
 }
 
+// withExpBackoff runs op with retries using exponential backoff + jitter.
+// Semantics: MaxRetries = number of *retries* after the initial attempt,
+// so total attempts = MaxRetries + 1.
 func (c *Client) withExpBackoff(
 	ctx context.Context,
 	label string,
@@ -357,45 +420,69 @@ func (c *Client) withExpBackoff(
 	}
 
 	var lastErr error
-	backoff := c.InitialBackoff
+
+	// Floors to avoid tight spins when caller sets zeros.
+	initial := c.InitialBackoff
+	if initial <= 0 {
+		initial = 50 * time.Millisecond
+	}
+	max := c.MaxBackoff
+	if max <= 0 {
+		max = 2 * time.Second
+	}
+	backoff := initial
 
 	for attempt := 0; ; attempt++ {
+		// attempt is 0-based; pass it through as-is to op.
 		if err := op(attempt); err == nil {
 			return nil
 		} else {
 			lastErr = err
 		}
 
-		if !isRetryable(lastErr) || attempt >= c.MaxDownloadRetries {
+		// If it's not retryable or we've exhausted retries, bail.
+		// attempt counts the *completed* attempts so far; we allow up to MaxRetries retries.
+		if !isRetryable(lastErr) || attempt >= c.MaxRetries {
 			if label != "" {
-				return fmt.Errorf("%s: %w", label, lastErr)
+				// attempt+1 = human-readable total attempts performed
+				return fmt.Errorf("%s (attempt %d): %w", label, attempt+1, lastErr)
 			}
 			return lastErr
 		}
 
-		// jittered sleep capped at MaxBackoff; honor ctx
+		// jittered sleep capped at max; ensure positive delay
 		delay := apierr.JitteredBackoff(backoff)
-		delay = min(delay, c.MaxBackoff)
+		if delay <= 0 {
+			delay = time.Millisecond
+		}
+		if delay > max {
+			delay = max
+		}
 
 		timer := time.NewTimer(delay)
 		select {
 		case <-timer.C:
-			// wait for retry
+			// proceed to next retry
 		case <-ctx.Done():
+			// drain timer if needed
 			if !timer.Stop() {
-				<-timer.C
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
 			if label != "" {
 				return fmt.Errorf("%s: context: %w", label, ctx.Err())
 			}
 			return ctx.Err()
 		}
-		timer.Stop() // safe call
+		// Best-effort stop; safe even if already fired.
+		timer.Stop()
 
-		// grow backoff, capped
+		// exponential growth capped at max
 		backoff *= 2
-		if backoff > c.MaxBackoff {
-			backoff = c.MaxBackoff
+		if backoff > max {
+			backoff = max
 		}
 	}
 }
@@ -403,11 +490,4 @@ func (c *Client) withExpBackoff(
 // helper to build "projects/{id}/<suffix>"
 func (c *Client) projectPath(suffix string) string {
 	return fmt.Sprintf("projects/%s/%s", c.ProjectID, suffix)
-}
-
-func min(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
 }

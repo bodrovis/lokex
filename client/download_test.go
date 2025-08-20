@@ -78,14 +78,10 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		}
 		d := client.NewDownloader(cli)
 
-		body := map[string]any{
+		buf := mustJSONBody(t, map[string]any{
 			"include_tags": []string{"one", "two"},
 			"format":       "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		})
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -111,13 +107,7 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		}
 		d := client.NewDownloader(cli)
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		_, err = d.FetchBundle(context.Background(), buf)
 		if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
@@ -142,13 +132,7 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 
 		d := client.NewDownloader(cli)
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		_, err = d.FetchBundle(context.Background(), buf)
 		if err == nil {
@@ -172,8 +156,6 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		cli, err := client.NewClient(
 			token,
 			projectID,
-			// unexpected EOF is actually retryable but no need to retry here
-			client.WithMaxDownloadRetries(0),
 		)
 		if err != nil {
 			t.Fatal(err)
@@ -181,16 +163,10 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 
 		d := client.NewDownloader(cli)
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		_, err = d.FetchBundle(context.Background(), buf)
-		if err == nil || !strings.Contains(err.Error(), "decode response: unexpected EOF") {
+		if err == nil || !strings.Contains(err.Error(), "decode response: unexpected end of JSON input") {
 			t.Fatalf("want decode response error, got %v", err)
 		}
 	})
@@ -216,13 +192,7 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 		defer cancel()
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		_, err = d.FetchBundle(ctx, buf)
 		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
@@ -728,13 +698,7 @@ func TestDownloader_FetchBundleAsync(t *testing.T) {
 
 		d := client.NewDownloader(cli)
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		url, err := d.FetchBundleAsync(context.Background(), buf)
 		if err != nil {
@@ -764,13 +728,7 @@ func TestDownloader_FetchBundleAsync(t *testing.T) {
 
 		d := client.NewDownloader(cli)
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		_, err = d.FetchBundleAsync(context.Background(), buf)
 		if err == nil || !strings.Contains(err.Error(), "failed") {
@@ -800,17 +758,108 @@ func TestDownloader_FetchBundleAsync(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 
-		body := map[string]any{
-			"format": "json",
-		}
-		buf, err := utils.EncodeJSONBody(body)
-		if err != nil {
-			t.Fatalf("cannot encode body")
-		}
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
 		_, err = d.FetchBundleAsync(ctx, buf)
 		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 			t.Fatalf("want context deadline, got %v", err)
 		}
 	})
+}
+
+func TestDownloadAndUnzip_RetryOnUnexpectedEOFThenSuccess(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	// valid zip for the second attempt
+	okZip := buildZip(t, map[string]string{"ok.txt": "ok"}, nil)
+
+	url := "https://cdn.example.com/trunc-then-ok.zip"
+	attempt := 0
+	httpmock.RegisterResponder("GET", url, func(_ *http.Request) (*http.Response, error) {
+		attempt++
+		if attempt == 1 {
+			// body shorter than Content-Length => triggers our short-read check
+			resp := httpmock.NewBytesResponse(200, []byte("short"))
+			resp.Header.Set("Content-Length", "12345")
+			resp.Header.Set("Content-Type", "application/zip")
+			return resp, nil
+		}
+		return httpmock.NewBytesResponse(200, okZip), nil
+	})
+
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(1*time.Millisecond, 5*time.Millisecond))
+	dl := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	if err := dl.DownloadAndUnzip(context.Background(), url, dest); err != nil {
+		t.Fatalf("DownloadAndUnzip: %v", err)
+	}
+
+	// retried exactly once
+	if got := httpmock.GetCallCountInfo()["GET "+url]; got != 2 {
+		t.Fatalf("attempts=%d, want 2", got)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dest, "ok.txt")); string(b) != "ok" {
+		t.Fatalf("unzipped wrong/missing")
+	}
+}
+
+func TestDownloadAndUnzip_RetryOnCorruptZipThenSuccess(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	okZip := buildZip(t, map[string]string{"x.txt": "x"}, nil)
+
+	url := "https://cdn.example.com/corrupt-then-ok.zip"
+	attempt := 0
+	httpmock.RegisterResponder("GET", url, func(_ *http.Request) (*http.Response, error) {
+		attempt++
+		if attempt == 1 {
+			return httpmock.NewBytesResponse(200, []byte("not a zip")), nil
+		}
+		return httpmock.NewBytesResponse(200, okZip), nil
+	})
+
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(1*time.Millisecond, 5*time.Millisecond))
+	dl := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	if err := dl.DownloadAndUnzip(context.Background(), url, dest); err != nil {
+		t.Fatalf("DownloadAndUnzip: %v", err)
+	}
+	if got := httpmock.GetCallCountInfo()["GET "+url]; got != 2 {
+		t.Fatalf("attempts=%d, want 2", got)
+	}
+}
+
+func TestFetcher_AllowsEmptyBodyOn2xx(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+	target := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/download", projectID)
+
+	// 204 No Content
+	httpmock.RegisterResponder("POST", target, func(*http.Request) (*http.Response, error) {
+		resp := httpmock.NewStringResponse(204, "")
+		return resp, nil
+	})
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	buf := mustJSONBody(t, map[string]any{"format": "json"})
+	// Expect a decode error about missing bundle_url, not EOF
+	_, err := d.FetchBundle(context.Background(), buf)
+	if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
+		t.Fatalf("want empty bundle url error, got %v", err)
+	}
+}
+
+func mustJSONBody(t *testing.T, m map[string]any) io.Reader {
+	t.Helper()
+	r, err := utils.EncodeJSONBody(m)
+	if err != nil {
+		t.Fatalf("encode body: %v", err)
+	}
+	return r
 }

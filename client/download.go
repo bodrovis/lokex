@@ -8,7 +8,9 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/bodrovis/lokex/apierr"
@@ -76,7 +78,7 @@ func (d *Downloader) FetchBundleAsync(ctx context.Context, body io.Reader) (stri
 	var resp AsyncDownloadResponse
 	path := d.client.projectPath("files/async-download")
 
-	_, err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &resp)
+	err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &resp)
 	if err != nil {
 		return "", fmt.Errorf("fetch bundle async: %w", err)
 	}
@@ -109,7 +111,7 @@ func (d *Downloader) FetchBundle(ctx context.Context, body io.Reader) (string, e
 	var bundle DownloadBundle
 	path := d.client.projectPath("files/download")
 
-	_, err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &bundle)
+	err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &bundle)
 	if err != nil {
 		return "", fmt.Errorf("fetch bundle: %w", err)
 	}
@@ -141,14 +143,22 @@ func (d *Downloader) DownloadAndUnzip(ctx context.Context, bundleURL, destDir st
 		ua = d.client.UserAgent
 	}
 
-	err = d.client.withExpBackoff(ctx, "download", func(_ int) error {
-		return d.downloadOnce(ctx, bundleURL, tmpPath, ua)
-	}, nil)
-	if err != nil {
+	if err := d.client.withExpBackoff(ctx, "download", func(_ int) error {
+		if err := d.downloadOnce(ctx, bundleURL, tmpPath, ua); err != nil {
+			return err
+		}
+		// validate it's a real zip; if not, return ErrUnexpectedEOF to trigger retry
+		zr, zerr := zip.OpenReader(tmpPath)
+		if zerr != nil {
+			return fmt.Errorf("zip validate: %w", io.ErrUnexpectedEOF)
+		}
+		_ = zr.Close()
+		return nil
+	}, nil); err != nil {
 		return err
 	}
 
-	// Unzip safely into destDir
+	// unzip after a validated download
 	if err := unzipSafe(tmpPath, destDir); err != nil {
 		return fmt.Errorf("unzip: %w", err)
 	}
@@ -163,6 +173,8 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
 	}
+	req.Header.Set("Accept-Encoding", "identity")
+	req.Header.Set("Accept", "application/zip, application/octet-stream, */*")
 
 	hc := d.client.HTTPClient
 	resp, err := hc.Do(req)
@@ -182,7 +194,7 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 		}
 	}
 
-	f, err := os.Create(destPath) // truncate/overwrite
+	f, err := os.Create(destPath)
 	if err != nil {
 		return fmt.Errorf("create temp zip: %w", err)
 	}
@@ -190,11 +202,24 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 		_ = f.Close()
 	}()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	var want int64 = -1
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if n, perr := strconv.ParseInt(cl, 10, 64); perr == nil && n >= 0 {
+			want = n
+		}
+	}
+
+	n, err := io.Copy(f, resp.Body)
+	if err != nil {
 		return fmt.Errorf("write zip: %w", err)
 	}
 	if err := f.Sync(); err != nil {
 		return fmt.Errorf("flush zip: %w", err)
+	}
+
+	// trigger retry if server cut us short
+	if want >= 0 && n != want {
+		return fmt.Errorf("incomplete download: got %d of %d: %w", n, want, io.ErrUnexpectedEOF)
 	}
 	return nil
 }
@@ -216,11 +241,30 @@ func unzipSafe(srcZip, destDir string) error {
 		return err
 	}
 
+	const (
+		maxFiles       = 20000
+		maxTotalUnzip  = 2 << 30   // 2 GiB
+		maxSingleUnzip = 512 << 20 // 512 MiB
+	)
+
+	var total int64
+	if len(r.File) > maxFiles {
+		return fmt.Errorf("zip too many files: %d", len(r.File))
+	}
+
 	for _, f := range r.File {
+		if f.UncompressedSize64 > maxSingleUnzip {
+			return fmt.Errorf("zip entry too big: %s (%d bytes)", f.Name, f.UncompressedSize64)
+		}
+		if total += int64(f.UncompressedSize64); total > maxTotalUnzip {
+			return fmt.Errorf("zip too large uncompressed: %d", total)
+		}
 		// Normalize path inside the zip (remove leading slashes, clean ..)
-		rel := filepath.Clean(f.Name)
-		rel = strings.TrimPrefix(rel, "/")
-		rel = strings.TrimPrefix(rel, string(filepath.Separator))
+		rel := path.Clean(f.Name)          // not filepath.Clean
+		rel = strings.TrimPrefix(rel, "/") // strip leading slashes
+		if rel == "." {
+			continue
+		} // ignore weird root entries
 		targetPath := filepath.Join(destDir, rel)
 
 		// zip-slip guard: ensure final path is still under destDir
@@ -241,10 +285,7 @@ func unzipSafe(srcZip, destDir string) error {
 			continue
 		}
 
-		// (Optional) Skip symlinks for portability/safety. If you do want them,
-		// open f and read the link target; create os.Symlink safely.
-		if mode&os.ModeSymlink != 0 {
-			// skip silently; or: return fmt.Errorf("symlinks not supported: %s", f.Name)
+		if mode&os.ModeSymlink != 0 || mode&os.ModeDevice != 0 || mode&os.ModeNamedPipe != 0 || mode&os.ModeSocket != 0 {
 			continue
 		}
 
