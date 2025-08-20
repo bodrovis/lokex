@@ -260,11 +260,12 @@ func unzipSafe(srcZip, destDir string) error {
 			return fmt.Errorf("zip too large uncompressed: %d", total)
 		}
 		// Normalize path inside the zip (remove leading slashes, clean ..)
-		rel := path.Clean(f.Name)          // not filepath.Clean
-		rel = strings.TrimPrefix(rel, "/") // strip leading slashes
-		if rel == "." {
+		rel := path.Clean(f.Name)
+		rel = strings.TrimPrefix(rel, "/")
+		rel = strings.TrimPrefix(rel, "./")
+		if rel == "." || rel == "" {
 			continue
-		} // ignore weird root entries
+		}
 		targetPath := filepath.Join(destDir, rel)
 
 		// zip-slip guard: ensure final path is still under destDir
@@ -276,15 +277,16 @@ func unzipSafe(srcZip, destDir string) error {
 			return fmt.Errorf("unsafe path in zip: %q", f.Name)
 		}
 
-		mode := f.Mode()
-
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetAbs, mode.Perm()); err != nil {
+		info := f.FileInfo()
+		if info.IsDir() {
+			if err := os.MkdirAll(targetAbs, 0o755); err != nil {
 				return err
 			}
 			continue
 		}
 
+		mode := info.Mode()
+		// skip risky types
 		if mode&os.ModeSymlink != 0 || mode&os.ModeDevice != 0 || mode&os.ModeNamedPipe != 0 || mode&os.ModeSocket != 0 {
 			continue
 		}
@@ -296,7 +298,11 @@ func unzipSafe(srcZip, destDir string) error {
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
+		perm := mode.Perm()
+		if perm == 0 {
+			perm = 0o644 // sane default if zip lacks perms
+		}
+		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
 		if err != nil {
 			defer func() {
 				_ = rc.Close()

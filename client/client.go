@@ -165,7 +165,7 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	token = strings.TrimSpace(token)
 	projectID = strings.TrimSpace(projectID)
 	if token == "" {
-		return nil, errors.New("token is required")
+		return nil, errors.New("API token is required")
 	}
 	if projectID == "" {
 		return nil, errors.New("project ID is required")
@@ -204,7 +204,6 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
 	start := time.Now()
 
-	// sane floors / symmetry with options
 	wait := c.PollInitialWait
 	if wait <= 0 {
 		wait = defaultPollInitialWait
@@ -282,6 +281,7 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 		if sleep > remaining {
 			sleep = remaining
 		}
+
 		if sleep <= 0 {
 			sleep = 10 * time.Millisecond // tiny floor to avoid spin
 		}
@@ -315,7 +315,6 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 }
 
 func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader, v any) error {
-	// If body isn't rewindable, buffer it once here so retries are safe
 	var payload []byte
 	if body != nil {
 		b, err := io.ReadAll(body)
@@ -332,28 +331,43 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		if payload != nil {
 			rdr = bytes.NewReader(payload)
 			headers.Set("Content-Type", "application/json")
-			headers.Set("Content-Length", fmt.Sprintf("%d", len(payload)))
 		}
 
 		err := c.doRequest(ctx, method, path, rdr, v, headers)
 		if err != nil {
 			return err
 		}
+
 		return nil
 	}, nil)
 	if err != nil {
 		return err
 	}
+
 	return nil
 }
 
 // doRequest performs a single HTTP request, no retries.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any, headers http.Header) error {
-	url := c.BaseURL + path
+	fullUrl, err := url.JoinPath(c.BaseURL, path)
+	if err != nil {
+		return fmt.Errorf("join url: %w", err)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	req, err := http.NewRequestWithContext(ctx, method, fullUrl, body)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
+	}
+	if body != nil {
+		if br, ok := body.(*bytes.Reader); ok {
+			req.ContentLength = int64(br.Len())
+		}
+		if sr, ok := body.(*strings.Reader); ok {
+			req.ContentLength = int64(sr.Len())
+		}
+		if bb, ok := body.(*bytes.Buffer); ok {
+			req.ContentLength = int64(bb.Len())
+		}
 	}
 
 	req.Header.Set("X-Api-Token", c.Token)
@@ -391,18 +405,19 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	b, rerr := io.ReadAll(resp.Body)
 	if rerr != nil {
 		// If the server closed early (truncated body), bubble this up as-is so the
-		// retry layer can decide (we'll mark it retryable below).
+		// retry layer can decide
 		return fmt.Errorf("read response: %w", rerr)
 	}
 
 	if len(bytes.TrimSpace(b)) == 0 {
-		// 204 or empty JSON body — treat as success
+		// 204 or empty JSON body, treat as success
 		return nil
 	}
 
 	if err := json.Unmarshal(b, v); err != nil {
 		return fmt.Errorf("decode response: %w", err)
 	}
+
 	return nil
 }
 

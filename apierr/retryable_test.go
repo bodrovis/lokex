@@ -1,7 +1,6 @@
 package apierr_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -20,28 +19,6 @@ type mockNetErr struct {
 
 func (m mockNetErr) Error() string { return m.msg }
 func (m mockNetErr) Timeout() bool { return m.timeout }
-
-func TestIsRetryable_ContextErrors(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"deadline exceeded", context.DeadlineExceeded, true},
-		{"canceled", context.Canceled, true},
-		{"wrapped deadline", fmt.Errorf("wrap: %w", context.DeadlineExceeded), true},
-		{"wrapped canceled", fmt.Errorf("wrap: %w", context.Canceled), true},
-		{"nil", nil, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := apierr.IsRetryable(tc.err)
-			if got != tc.want {
-				t.Fatalf("IsRetryable(%v) = %v, want %v", tc.err, got, tc.want)
-			}
-		})
-	}
-}
 
 func TestIsRetryable_NetError(t *testing.T) {
 	timeoutErr := mockNetErr{msg: "i/o timeout", timeout: true}

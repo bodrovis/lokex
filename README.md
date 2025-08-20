@@ -4,6 +4,8 @@
 
 ## Usage
 
+### Downloads
+
 Download and unzip the translation bundle into `./locales`:
 
 ```go
@@ -15,6 +17,11 @@ client, err := client.NewClient("YOUR_API_TOKEN", "LOKALISE_PROJECT_ID", nil)
 if err != nil {
     log.Fatal(err)
 }
+// Or, configure client with helper methods, for example:
+// client, err := client.NewClient(token, projectID, client.WithBackoff(
+//     1*time.Second,
+//     5*time.Second,
+// ))
 
 downloader := client.NewDownloader(client)
 
@@ -23,6 +30,7 @@ defer cancel()
 
 url, err := downloader.Download(ctx, "./locales", client.DownloadParams{
     "format": "json",
+    // Pass other API request params here...
     // Enable async downloads:
     // "async": true,
 })
@@ -49,4 +57,4 @@ go test ./... -v
 
 ## License
 
-MIT
+BSD 3 Clause
