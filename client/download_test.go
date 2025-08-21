@@ -634,8 +634,7 @@ func TestIntegration_DownloadAsync(t *testing.T) {
 
 	localesDir := filepath.Join("./", "locales-async")
 
-	url, err := d.Download(ctx, localesDir, client.DownloadParams{
-		"async":  true,
+	url, err := d.DownloadAsync(ctx, localesDir, client.DownloadParams{
 		"format": "json",
 	})
 	if err != nil {

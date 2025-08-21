@@ -29,6 +29,8 @@ type AsyncDownloadResponse struct {
 
 type DownloadParams map[string]any
 
+type FetchFunc func(ctx context.Context, body io.Reader) (string, error)
+
 func NewDownloader(c *Client) *Downloader {
 	return &Downloader{
 		client: c,
@@ -36,17 +38,21 @@ func NewDownloader(c *Client) *Downloader {
 }
 
 func (d *Downloader) Download(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
-	// detect async flag
-	async := false
-	if v, ok := params["async"]; ok {
-		if bv, ok := v.(bool); ok && bv {
-			async = true
-		}
-	}
+	return d.doDownload(ctx, unzipTo, params, d.FetchBundle)
+}
 
+func (d *Downloader) DownloadAsync(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
+	return d.doDownload(ctx, unzipTo, params, d.FetchBundleAsync)
+}
+
+func (d *Downloader) doDownload(
+	ctx context.Context,
+	unzipTo string,
+	params DownloadParams,
+	fetch FetchFunc,
+) (string, error) {
 	body := make(map[string]any, len(params))
 	maps.Copy(body, params)
-	delete(body, "async")
 
 	var err error
 
@@ -55,13 +61,7 @@ func (d *Downloader) Download(ctx context.Context, unzipTo string, params Downlo
 		return "", fmt.Errorf("download: %w", err)
 	}
 
-	var bundleURL string
-
-	if async {
-		bundleURL, err = d.FetchBundleAsync(ctx, buf)
-	} else {
-		bundleURL, err = d.FetchBundle(ctx, buf)
-	}
+	bundleURL, err := fetch(ctx, buf)
 	if err != nil {
 		return "", err
 	}
