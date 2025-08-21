@@ -4,9 +4,7 @@
 
 ## Usage
 
-### Downloads
-
-Download and unzip the translation bundle into `./locales`:
+### Create a client
 
 ```go
 import (
@@ -22,23 +20,50 @@ if err != nil {
 //     1*time.Second,
 //     5*time.Second,
 // ))
+```
 
+### Downloads
+
+Download and unzip the translation bundle into `./locales`:
+
+```go
 downloader := client.NewDownloader(client)
 
 ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 defer cancel()
 
+// call DownloadAsync() with the same arguments to perform async download
 url, err := downloader.Download(ctx, "./locales", client.DownloadParams{
     "format": "json",
     // Pass other API request params here...
-    // Enable async downloads:
-    // "async": true,
 })
 if err != nil {
     log.Fatal(err)
 }
 
 fmt.Println("Bundle downloaded from:", url)
+```
+
+### Upload
+
+Upload JSON file for English (`en`) locale:
+
+```go
+uploader := client.NewUploader(cli)
+
+fp := filepath.Join(dir, "en.json")
+
+ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+defer cancel()
+
+pid, err := uploader.Upload(ctx, client.UploadParams{
+    "filename": fp,
+    "lang_iso": "en",
+    // add other API params ...
+})
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Testing
