@@ -44,7 +44,7 @@ if err != nil {
 fmt.Println("Bundle downloaded from:", url)
 ```
 
-### Upload
+### Uploads
 
 Upload JSON file for English (`en`) locale:
 
@@ -64,6 +64,8 @@ pid, err := uploader.Upload(ctx, client.UploadParams{
 if err != nil {
     log.Fatal(err)
 }
+
+fmt.Println("Upload process ID completed:", pid)
 ```
 
 ## Testing
