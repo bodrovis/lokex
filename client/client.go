@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bodrovis/lokex/apierr"
+	"github.com/bodrovis/lokex/internal/apierr"
 )
 
 const (

@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/bodrovis/lokex/apierr"
+	"github.com/bodrovis/lokex/internal/apierr"
 )
 
 // Compile-time check: APIError implements error.

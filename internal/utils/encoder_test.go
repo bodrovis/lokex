@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bodrovis/lokex/utils"
+	"github.com/bodrovis/lokex/internal/utils"
 )
 
 func TestEncodeJSONBody_DisablesHTMLEscaping_AndAddsNewline(t *testing.T) {

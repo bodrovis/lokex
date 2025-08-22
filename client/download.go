@@ -13,20 +13,18 @@
 package client
 
 import (
-	"archive/zip"
 	"context"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"os"
-	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 
-	"github.com/bodrovis/lokex/apierr"
-	"github.com/bodrovis/lokex/utils"
+	"github.com/bodrovis/lokex/internal/apierr"
+	"github.com/bodrovis/lokex/internal/utils"
+	"github.com/bodrovis/lokex/internal/zipx"
 )
 
 // Downloader wraps a *Client to perform Lokalise file exports (downloads).
@@ -197,18 +195,12 @@ func (d *Downloader) DownloadAndUnzip(ctx context.Context, bundleURL, destDir st
 			return err
 		}
 		// validate it's a real zip; if not, return ErrUnexpectedEOF to trigger retry
-		zr, zerr := zip.OpenReader(tmpPath)
-		if zerr != nil {
-			return fmt.Errorf("zip validate: %w", io.ErrUnexpectedEOF)
-		}
-		_ = zr.Close()
-		return nil
+		return zipx.Validate(tmpPath)
 	}, nil); err != nil {
 		return err
 	}
 
-	// unzip after a validated download
-	if err := unzipSafe(tmpPath, destDir); err != nil {
+	if err := zipx.Unzip(tmpPath, destDir, zipx.DefaultPolicy()); err != nil {
 		return fmt.Errorf("unzip: %w", err)
 	}
 	return nil
@@ -273,108 +265,6 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 	// trigger retry if server cut us short
 	if want >= 0 && n != want {
 		return fmt.Errorf("incomplete download: got %d of %d: %w", n, want, io.ErrUnexpectedEOF)
-	}
-	return nil
-}
-
-// unzipSafe extracts a zip archive to destDir with multiple safety checks:
-//
-//   - Ensures the number of files and their total uncompressed size are bounded.
-//   - Guards against zip-slip by verifying resulting absolute paths remain
-//     under destDir.
-//   - Skips special files (symlinks, devices, fifos, sockets).
-//   - Preserves regular file perms when present; otherwise falls back to 0644.
-func unzipSafe(srcZip, destDir string) error {
-	r, err := zip.OpenReader(srcZip)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = r.Close()
-	}()
-
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
-		return err
-	}
-	destAbs, err := filepath.Abs(destDir)
-	if err != nil {
-		return err
-	}
-
-	const (
-		maxFiles       = 20000
-		maxTotalUnzip  = 2 << 30   // 2 GiB
-		maxSingleUnzip = 512 << 20 // 512 MiB
-	)
-
-	var total int64
-	if len(r.File) > maxFiles {
-		return fmt.Errorf("zip too many files: %d", len(r.File))
-	}
-
-	for _, f := range r.File {
-		if f.UncompressedSize64 > maxSingleUnzip {
-			return fmt.Errorf("zip entry too big: %s (%d bytes)", f.Name, f.UncompressedSize64)
-		}
-		if total += int64(f.UncompressedSize64); total > maxTotalUnzip {
-			return fmt.Errorf("zip too large uncompressed: %d", total)
-		}
-		// Normalize path inside the zip (remove leading slashes, clean ..)
-		rel := path.Clean(f.Name)
-		rel = strings.TrimPrefix(rel, "/")
-		rel = strings.TrimPrefix(rel, "./")
-		if rel == "." || rel == "" {
-			continue
-		}
-		targetPath := filepath.Join(destDir, rel)
-
-		// zip-slip guard: ensure final path is still under destDir
-		targetAbs, err := filepath.Abs(targetPath)
-		if err != nil {
-			return err
-		}
-		if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(filepath.Separator)) {
-			return fmt.Errorf("unsafe path in zip: %q", f.Name)
-		}
-
-		info := f.FileInfo()
-		if info.IsDir() {
-			if err := os.MkdirAll(targetAbs, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-
-		mode := info.Mode()
-		// skip risky types
-		if mode&os.ModeSymlink != 0 || mode&os.ModeDevice != 0 || mode&os.ModeNamedPipe != 0 || mode&os.ModeSocket != 0 {
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(targetAbs), 0o755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		perm := mode.Perm()
-		if perm == 0 {
-			perm = 0o644 // sane default if zip lacks perms
-		}
-		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
-		if err != nil {
-			defer func() { _ = rc.Close() }()
-			return err
-		}
-		_, copyErr := io.Copy(out, rc)
-		defer func() { _ = rc.Close() }()
-		if cerr := out.Close(); copyErr == nil && cerr != nil {
-			copyErr = cerr
-		}
-		if copyErr != nil {
-			return copyErr
-		}
 	}
 	return nil
 }

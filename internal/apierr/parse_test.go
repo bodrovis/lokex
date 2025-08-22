@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/bodrovis/lokex/apierr"
+	"github.com/bodrovis/lokex/internal/apierr"
 )
 
 func TestParse_NonJSON(t *testing.T) {

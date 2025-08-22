@@ -18,7 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bodrovis/lokex/utils"
+	"github.com/bodrovis/lokex/internal/utils"
 )
 
 // Uploader wraps a *Client to perform Lokalise file uploads.
