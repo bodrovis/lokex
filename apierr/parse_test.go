@@ -1,6 +1,7 @@
 package apierr_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -107,9 +108,10 @@ func TestParse_NestedError_NoCode_GetsHTTPStatusAsCode(t *testing.T) {
 		t.Fatalf("Message=%q want %q", e.Message, "boom")
 	}
 	// details should pass through
-	if e.Details == nil || e.Details["x"] != float64(1) {
-		t.Fatalf("Details=%#v want x=1", e.Details)
+	if e.Details == nil {
+		t.Fatalf("Details=nil")
 	}
+	wantInt1(t, e.Details["x"], "Details[x]")
 }
 
 func TestParse_AltTopLevel_Code(t *testing.T) {
@@ -126,9 +128,10 @@ func TestParse_AltTopLevel_Code(t *testing.T) {
 	if e.Message != "bad" {
 		t.Fatalf("Message=%q want %q", e.Message, "bad")
 	}
-	if e.Details == nil || e.Details["a"] != float64(1) {
-		t.Fatalf("Details=%#v want a=1", e.Details)
+	if e.Details == nil {
+		t.Fatalf("Details=nil")
 	}
+	wantInt1(t, e.Details["a"], "Details[a]")
 }
 
 func TestParse_AltTopLevel_ErrorCode(t *testing.T) {
@@ -177,5 +180,59 @@ func TestParse_TrimsRaw(t *testing.T) {
 	e := apierr.Parse(body, st)
 	if e.Raw != `{"message":"oops","code":123}` {
 		t.Fatalf("Raw=%q not trimmed as expected", e.Raw)
+	}
+}
+
+func TestParse_AltTopLevel_Code_StringNumber(t *testing.T) {
+	body := []byte(`{"message":"bad","code":"429","details":{"a":1}}`)
+	e := apierr.Parse(body, http.StatusBadRequest)
+	if e.Code != 429 || e.Message != "bad" {
+		t.Fatalf("got code=%d msg=%q", e.Code, e.Message)
+	}
+}
+
+func TestParse_TopLevel_StatusCode_String(t *testing.T) {
+	body := []byte(`{"message":"oops","statusCode":"400","error":"Bad Request"}`)
+	e := apierr.Parse(body, http.StatusBadRequest)
+	if e.Code != 400 || e.Reason != "Bad Request" || e.Message != "oops" {
+		t.Fatalf("unexpected parse: %+v", e)
+	}
+}
+
+func TestParse_NestedError_DetailsArray_Preserved(t *testing.T) {
+	body := []byte(`{"error":{"message":"boom","code":500,"details":["x","y"]}}`)
+	e := apierr.Parse(body, 500)
+	// parser wraps non-object details as {"details": <value>}
+	arr, ok := e.Details["details"].([]any)
+	if !ok || len(arr) != 2 || arr[0] != "x" || arr[1] != "y" {
+		t.Fatalf("details not preserved: %#v", e.Details)
+	}
+}
+
+func TestParse_EmptyBody(t *testing.T) {
+	e := apierr.Parse([]byte(""), http.StatusBadGateway)
+	if e.Reason != "non-json error body" || e.Raw != "" {
+		t.Fatalf("unexpected: %+v", e)
+	}
+}
+
+// helper
+func wantInt1(t *testing.T, v any, field string) {
+	t.Helper()
+	switch x := v.(type) {
+	case float64:
+		if int(x) != 1 {
+			t.Fatalf("%s=%v want 1 (float64)", field, v)
+		}
+	case json.Number:
+		if x.String() != "1" {
+			t.Fatalf("%s=%v want 1 (json.Number)", field, v)
+		}
+	case string:
+		if x != "1" {
+			t.Fatalf("%s=%q want \"1\" (string)", field, x)
+		}
+	default:
+		t.Fatalf("%s has unexpected type %T (value=%v); want number-like 1", field, v, v)
 	}
 }

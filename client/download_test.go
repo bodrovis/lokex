@@ -248,6 +248,78 @@ func TestDownloadAndUnzip_Happy(t *testing.T) {
 	checkFile("root.txt", "top")
 }
 
+func TestDownloadAndUnzip_HeadersAreSet(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	zb := buildZip(t, map[string]string{"a.txt": "a"}, nil)
+	url := "https://cdn.example.com/h.zip"
+
+	ua := "lokex-tests/1.0"
+	registerZipResponderWithHeaderAsserts(t, url, zb, ua)
+
+	cli, err := client.NewClient(token, projectID, client.WithUserAgent(ua))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dl := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	if err := dl.DownloadAndUnzip(context.Background(), url, dest); err != nil {
+		t.Fatalf("DownloadAndUnzip: %v", err)
+	}
+}
+
+func TestDownloadAndUnzip_EmptyURL(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	dl := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	err := dl.DownloadAndUnzip(context.Background(), "   ", dest)
+	if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
+		t.Fatalf("want empty bundle url error, got %v", err)
+	}
+}
+
+func TestDownloader_Download_SyncFlow(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	postURL := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/download", projectID)
+	cdnURL := "https://cdn.example.com/sync.zip"
+
+	// POST → bundle_url
+	httpmock.RegisterResponder("POST", postURL, func(req *http.Request) (*http.Response, error) {
+		var got map[string]any
+		_ = json.NewDecoder(req.Body).Decode(&got)
+		if got["format"] != "json" {
+			t.Fatalf("format = %v, want json", got["format"])
+		}
+		return httpmock.NewStringResponse(200, `{"bundle_url":"`+cdnURL+`"}`), nil
+	})
+
+	// GET ZIP
+	zb := buildZip(t, map[string]string{"ok.txt": "ok"}, nil)
+	registerZipResponder(t, cdnURL, zb)
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	dl := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	url, err := dl.Download(context.Background(), dest, client.DownloadParams{"format": "json"})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if url != cdnURL {
+		t.Fatalf("bundle url mismatch: %q", url)
+	}
+
+	b, err := os.ReadFile(filepath.Join(dest, "ok.txt"))
+	if err != nil || string(b) != "ok" {
+		t.Fatalf("unzipped wrong: %v %q", err, string(b))
+	}
+}
+
 func TestDownloadAndUnzip_ZipSlipBlocked(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
@@ -511,59 +583,6 @@ func TestDownloadAndUnzip_ContextCanceled(t *testing.T) {
 	if err == nil || !errors.Is(err, context.Canceled) {
 		t.Fatalf("want context canceled, got %v", err)
 	}
-}
-
-func buildZip(t *testing.T, entries map[string]string, symlinks map[string]string) []byte {
-	t.Helper()
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-
-	// regular files
-	for name, content := range entries {
-		fh := &zip.FileHeader{
-			Name:   name,
-			Method: zip.Deflate,
-		}
-		// ensure dirs implied by name are created in archive entries (zip doesn't need explicit dir entries)
-		fh.SetMode(0o644)
-		w, err := zw.CreateHeader(fh)
-		if err != nil {
-			t.Fatalf("CreateHeader(%s): %v", name, err)
-		}
-		if _, err := io.Copy(w, strings.NewReader(content)); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
-	}
-
-	// symlinks (write target path as file content; unzipSafe should skip or handle)
-	for link, target := range symlinks {
-		fh := &zip.FileHeader{
-			Name:   link,
-			Method: zip.Store,
-		}
-		// mark as symlink
-		fh.SetMode(os.ModeSymlink | 0o777)
-		w, err := zw.CreateHeader(fh)
-		if err != nil {
-			t.Fatalf("CreateHeader(symlink %s): %v", link, err)
-		}
-		if _, err := io.Copy(w, strings.NewReader(target)); err != nil {
-			t.Fatalf("write symlink %s: %v", link, err)
-		}
-	}
-
-	if err := zw.Close(); err != nil {
-		t.Fatalf("close zip: %v", err)
-	}
-	return buf.Bytes()
-}
-
-func registerZipResponder(t *testing.T, url string, zipBytes []byte) {
-	t.Helper()
-	httpmock.RegisterResponder("GET", url, func(req *http.Request) (*http.Response, error) {
-		// we could assert UA here if needed
-		return httpmock.NewBytesResponse(200, zipBytes), nil
-	})
 }
 
 func TestIntegration_Download(t *testing.T) {
@@ -852,6 +871,75 @@ func TestFetcher_AllowsEmptyBodyOn2xx(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
 		t.Fatalf("want empty bundle url error, got %v", err)
 	}
+}
+
+func buildZip(t *testing.T, entries map[string]string, symlinks map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+
+	// regular files
+	for name, content := range entries {
+		fh := &zip.FileHeader{
+			Name:   name,
+			Method: zip.Deflate,
+		}
+		// ensure dirs implied by name are created in archive entries (zip doesn't need explicit dir entries)
+		fh.SetMode(0o644)
+		w, err := zw.CreateHeader(fh)
+		if err != nil {
+			t.Fatalf("CreateHeader(%s): %v", name, err)
+		}
+		if _, err := io.Copy(w, strings.NewReader(content)); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	// symlinks (write target path as file content; unzipSafe should skip or handle)
+	for link, target := range symlinks {
+		fh := &zip.FileHeader{
+			Name:   link,
+			Method: zip.Store,
+		}
+		// mark as symlink
+		fh.SetMode(os.ModeSymlink | 0o777)
+		w, err := zw.CreateHeader(fh)
+		if err != nil {
+			t.Fatalf("CreateHeader(symlink %s): %v", link, err)
+		}
+		if _, err := io.Copy(w, strings.NewReader(target)); err != nil {
+			t.Fatalf("write symlink %s: %v", link, err)
+		}
+	}
+
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func registerZipResponder(t *testing.T, url string, zipBytes []byte) {
+	t.Helper()
+	httpmock.RegisterResponder("GET", url, func(req *http.Request) (*http.Response, error) {
+		// we could assert UA here if needed
+		return httpmock.NewBytesResponse(200, zipBytes), nil
+	})
+}
+
+func registerZipResponderWithHeaderAsserts(t *testing.T, url string, zipBytes []byte, wantUA string) {
+	t.Helper()
+	httpmock.RegisterResponder("GET", url, func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("User-Agent"); wantUA != "" && got != wantUA {
+			t.Fatalf("GET UA = %q, want %q", got, wantUA)
+		}
+		if got := req.Header.Get("Accept"); got == "" {
+			t.Fatalf("GET Accept header missing")
+		}
+		if got := req.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Fatalf("GET Accept-Encoding = %q, want identity", got)
+		}
+		return httpmock.NewBytesResponse(200, zipBytes), nil
+	})
 }
 
 func mustJSONBody(t *testing.T, m map[string]any) io.Reader {

@@ -167,7 +167,7 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 		if got["filename"] == "" || got["lang_iso"] != "en" {
 			t.Fatalf("missing required fields: %#v", got)
 		}
-		// Ensure we didn’t overwrite provided data
+		// Ensure we didn't overwrite provided data
 		if got["data"] != "dGVzdA==" { // base64("test")
 			t.Fatalf("data overridden or wrong, got %v", got["data"])
 		}
@@ -211,7 +211,7 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 			t.Fatalf("decode req: %v", err)
 		}
 		if got["data"] != base64.StdEncoding.EncodeToString([]byte("XYZ")) {
-			t.Fatalf("data not base64’d, got %v", got["data"])
+			t.Fatalf("data not base64'd, got %v", got["data"])
 		}
 		return httpmock.NewStringResponse(200, `{"process":{"process_id":"u3"}}`), nil
 	})
@@ -301,7 +301,197 @@ func TestUploader_Upload_TimeoutWhilePolling(t *testing.T) {
 	}
 }
 
-// Optional: real integration test (skips in -short or if creds are placeholders)
+func TestUploader_Upload_SetsAcceptHeader_AndContentType(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
+		if got := req.Header.Get("Accept"); got != "application/json" {
+			t.Fatalf("Accept = %q, want application/json", got)
+		}
+		if got := req.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("Content-Type = %q, want application/json", got)
+		}
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"hdr1"}}`), nil
+	})
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "en.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	if _, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en",
+	}, false); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+func TestUploader_Upload_RejectsWeirdDataType(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "file.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en", "data": 12345, // not string/[]byte
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "'data' must be string or []byte") {
+		t.Fatalf("want type error, got %v", err)
+	}
+}
+
+func TestUploader_Upload_ReadFileError(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	// file path that doesn't exist
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": filepath.Join(t.TempDir(), "nope.json"),
+		"lang_iso": "en",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "stat") {
+		t.Fatalf("want stat/read error, got %v", err)
+	}
+}
+
+func TestUploader_Upload_EmptyProcessIDIsError(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	httpmock.RegisterResponder("POST", targetPost, httpmock.NewStringResponder(200, `{"process":{"process_id":""}}`))
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "en.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "empty process id") {
+		t.Fatalf("want empty process id error, got %v", err)
+	}
+}
+
+func TestUploader_Upload_Allows204EmptyBody_ButErrorsOnMissingProcess(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	// doRequest treats empty body as success → resp.Process zero-value → our check should error
+	httpmock.RegisterResponder("POST", targetPost, httpmock.NewStringResponder(204, ""))
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "en.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "empty process id") {
+		t.Fatalf("want empty process id error, got %v", err)
+	}
+}
+
+func TestUploader_Upload_RetriesOn5xxThenSucceeds(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	urlPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	attempt := 0
+	httpmock.RegisterResponder("POST", urlPost, func(*http.Request) (*http.Response, error) {
+		attempt++
+		if attempt == 1 {
+			return httpmock.NewStringResponse(503, "try later"), nil
+		}
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"retry_ok"}}`), nil
+	})
+	// poll finished
+	targetGet := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/processes/retry_ok", projectID)
+	httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+		"process":{"process_id":"retry_ok","status":"finished"}
+	}`))
+
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(1*time.Millisecond, 5*time.Millisecond))
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	if _, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en",
+	}, true); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+
+	calls := httpmock.GetCallCountInfo()
+	if calls["POST "+urlPost] != 2 {
+		t.Fatalf("POST attempts = %d, want 2", calls["POST "+urlPost])
+	}
+}
+
+func TestUploader_Upload_DoesNotRetryOn4xx(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	urlPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	httpmock.RegisterResponder("POST", urlPost, httpmock.NewStringResponder(400, `{"error":{"message":"bad"}}`))
+
+	cli, _ := client.NewClient(token, projectID, client.WithBackoff(1*time.Millisecond, 5*time.Millisecond))
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en",
+	}, false)
+	if err == nil {
+		t.Fatal("want error, got nil")
+	}
+	if got := httpmock.GetCallCountInfo()["POST "+urlPost]; got != 1 {
+		t.Fatalf("POST attempts = %d, want 1 (no retries on 4xx)", got)
+	}
+}
+
+func TestUploader_Upload_DecodeErrorBubbles(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	urlPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	// malformed JSON body in response
+	httpmock.RegisterResponder("POST", urlPost,
+		httpmock.NewStringResponder(200, `{"process":{"process_id":`),
+	)
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp, "lang_iso": "en",
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "decode response") {
+		t.Fatalf("want decode response error, got %v", err)
+	}
+}
+
 func TestIntegration_Upload(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")

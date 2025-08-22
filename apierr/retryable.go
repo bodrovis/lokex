@@ -1,34 +1,55 @@
+// apierr/retryable.go
 package apierr
 
 import (
+	"context"
 	"errors"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"syscall"
 	"time"
 )
 
-// IsRetryable says "worth another shot?" (backoff still on the caller).
+// IsRetryable returns true only for transient failures.
+// Order is IMPORTANT.
 func IsRetryable(err error) bool {
-	// timeouts from net/http, http2, tls, etc.
-	var to interface{ Timeout() bool }
-	if errors.As(err, &to) && to.Timeout() {
+	if err == nil {
+		return false
+	}
+
+	// 1) Real network timeouts from the net stack (dial/read/TLS): *net.OpError
+	var op *net.OpError
+	if errors.As(err, &op) && op.Timeout() {
 		return true
 	}
 
-	// flaky connections / short reads
+	// 2) Pure context budget errors → NOT retryable
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+
+	// 3) Other Timeout()-ish errors (e.g., url.Error, custom mocks) → retryable
+	var hasTimeout interface{ Timeout() bool }
+	if errors.As(err, &hasTimeout) && hasTimeout.Timeout() {
+		return true
+	}
+
+	// 4) Flaky transport / short reads → retryable
 	if errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
-		errors.Is(err, syscall.ECONNRESET) {
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNABORTED) {
 		return true
 	}
 
-	// server returned non-2xx
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.Status {
+	// 5) Retryable HTTP statuses → retryable
+	var ae *APIError
+	if errors.As(err, &ae) {
+		switch ae.Status {
 		case http.StatusRequestTimeout, // 408
 			http.StatusTooEarly,            // 425
 			http.StatusTooManyRequests,     // 429
@@ -39,16 +60,16 @@ func IsRetryable(err error) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
-// JitteredBackoff returns ~0.5x..1.5x of base with uniform jitter.
+// JitteredBackoff returns a randomized delay in [0.5*base, 1.5*base).
 // If base <= 0, defaults to 300ms.
 func JitteredBackoff(base time.Duration) time.Duration {
 	if base <= 0 {
 		base = 300 * time.Millisecond
 	}
-	// delta: [0, base)
-	delta := time.Duration(rand.Int63n(int64(base)))
+	delta := time.Duration(rand.Int63n(int64(base))) // [0, base)
 	return base/2 + delta
 }

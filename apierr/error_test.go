@@ -62,3 +62,27 @@ func TestAPIError_WrappingAndErrorsAs(t *testing.T) {
 		t.Fatalf("unexpected *APIError contents: %#v", target)
 	}
 }
+
+func TestAPIError_IsRetryableInteraction(t *testing.T) {
+	e := &apierr.APIError{Status: http.StatusTooManyRequests}
+	if !apierr.IsRetryable(e) {
+		t.Fatalf("429 should be retryable")
+	}
+}
+
+func TestAPIError_FieldsRoundtrip(t *testing.T) {
+	e := &apierr.APIError{
+		Status: 500, Code: 500, Reason: "server_error",
+		Details: map[string]any{"bucket": "global"},
+		Raw:     `{"error":"x"}`,
+		Resp:    &http.Response{StatusCode: 500},
+	}
+	wrapped := fmt.Errorf("boom: %w", e)
+	var got *apierr.APIError
+	if !errors.As(wrapped, &got) {
+		t.Fatal("errors.As failed")
+	}
+	if got.Reason != "server_error" || got.Raw == "" || got.Resp == nil || got.Details["bucket"] != "global" {
+		t.Fatalf("fields lost: %#v", got)
+	}
+}

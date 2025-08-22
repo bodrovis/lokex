@@ -1,3 +1,7 @@
+// Package client provides a wrapper around the Lokalise API that the
+// upload/download packages depend on. It handles base URL normalization,
+// authentication, JSON encoding/decoding, retry with exponential backoff,
+// and simple polling of asynchronous processes.
 package client
 
 import (
@@ -16,36 +20,53 @@ import (
 )
 
 const (
-	defaultBaseURL         = "https://api.lokalise.com/api2/"
-	defaultUserAgent       = "lokex/0.1"
-	defaultErrCap          = 8192
-	defaultMaxRetries      = 3
-	defaultInitialBackoff  = 400 * time.Millisecond
-	defaultMaxBackoff      = 5 * time.Second
-	defaultHTTPTimeout     = 30 * time.Second
+	// defaultBaseURL is the production Lokalise REST API v2 base.
+	defaultBaseURL = "https://api.lokalise.com/api2/"
+
+	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
+	defaultUserAgent = "lokex/1.0.0"
+
+	// defaultErrCap caps how many bytes we slurp from a non-2xx response when
+	// constructing an apierr.APIError.
+	defaultErrCap = 8192
+
+	// defaults for retry/backoff and HTTP timeouts.
+	defaultMaxRetries     = 3
+	defaultInitialBackoff = 400 * time.Millisecond
+	defaultMaxBackoff     = 5 * time.Second
+	defaultHTTPTimeout    = 30 * time.Second
+
+	// defaults for the polling helper.
 	defaultPollInitialWait = 1 * time.Second
 	defaultPollMaxWait     = 120 * time.Second
 )
 
+// Client is a minimal Lokalise API client.
+// It is safe for concurrent use after construction (fields are not mutated
+// post-NewClient). The embedded http.Client is used as-is.
 type Client struct {
-	BaseURL         string
-	Token           string
-	ProjectID       string
-	UserAgent       string
-	HTTPClient      *http.Client
-	MaxRetries      int
-	InitialBackoff  time.Duration
-	MaxBackoff      time.Duration
-	PollInitialWait time.Duration
-	PollMaxWait     time.Duration
+	BaseURL         string        // normalized base URL with trailing slash
+	Token           string        // API token (X-Api-Token header)
+	ProjectID       string        // default project ID for project-scoped endpoints
+	UserAgent       string        // User-Agent header value
+	HTTPClient      *http.Client  // underlying HTTP client
+	MaxRetries      int           // number of *retries* after first attempt
+	InitialBackoff  time.Duration // first backoff duration for withExpBackoff
+	MaxBackoff      time.Duration // cap for backoff (and jittered sleep)
+	PollInitialWait time.Duration // initial wait between PollProcesses rounds
+	PollMaxWait     time.Duration // overall cap for PollProcesses duration
 }
 
+// QueuedProcess is a normalized view over Lokalise "processes/*" responses.
+// DownloadURL is populated when the process produces a file (e.g., download).
 type QueuedProcess struct {
 	ProcessID   string `json:"process_id"`
 	Status      string `json:"status"`
 	DownloadURL string `json:"download_url,omitempty"`
 }
 
+// processResponse mirrors the subset of the Lokalise response we care about.
+// It stays unexported; callers use QueuedProcess instead.
 type processResponse struct {
 	Process struct {
 		ProcessID string `json:"process_id"`
@@ -57,6 +78,7 @@ type processResponse struct {
 	} `json:"process"`
 }
 
+// ToQueuedProcess converts a typed API response into a flattened QueuedProcess.
 func (pr *processResponse) ToQueuedProcess() QueuedProcess {
 	return QueuedProcess{
 		ProcessID:   pr.Process.ProcessID,
@@ -65,9 +87,12 @@ func (pr *processResponse) ToQueuedProcess() QueuedProcess {
 	}
 }
 
-// Option applies a customization to Client.
+// Option customizes a Client during construction.
+// Errors returned by an Option abort NewClient.
 type Option func(*Client) error
 
+// WithBaseURL sets a custom API base URL.
+// The value must be an absolute URL; a trailing slash is enforced.
 func WithBaseURL(u string) Option {
 	return func(c *Client) error {
 		u = strings.TrimSpace(u)
@@ -80,13 +105,15 @@ func WithBaseURL(u string) Option {
 		}
 		// normalize: ensure trailing slash and keep path/joining sane
 		if !strings.HasSuffix(parsed.Path, "/") {
-			parsed.Path = parsed.Path + "/"
+			parsed.Path += "/"
 		}
 		c.BaseURL = parsed.String()
 		return nil
 	}
 }
 
+// WithUserAgent overrides the default User-Agent string.
+// An empty value is ignored.
 func WithUserAgent(ua string) Option {
 	return func(c *Client) error {
 		ua = strings.TrimSpace(ua)
@@ -97,6 +124,8 @@ func WithUserAgent(ua string) Option {
 	}
 }
 
+// WithHTTPClient replaces the underlying http.Client.
+// The client must be non-nil.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) error {
 		if hc == nil {
@@ -107,6 +136,8 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
+// WithHTTPTimeout sets HTTP client timeout. If no HTTP client exists yet,
+// a default one is created first.
 func WithHTTPTimeout(d time.Duration) Option {
 	return func(c *Client) error {
 		if c.HTTPClient == nil {
@@ -117,14 +148,18 @@ func WithHTTPTimeout(d time.Duration) Option {
 	}
 }
 
+// WithMaxRetries sets how many *retries* to attempt after the initial try.
+// Use 0 (or negative) to disable retries entirely.
 func WithMaxRetries(n int) Option {
 	return func(c *Client) error {
-		// allow 0 or negative on purpose if caller wants to disable
 		c.MaxRetries = n
 		return nil
 	}
 }
 
+// WithBackoff sets the exponential backoff window for retries.
+// Zero/negative inputs fall back to library defaults.
+// If max < initial, max is promoted to initial.
 func WithBackoff(initial, max time.Duration) Option {
 	return func(c *Client) error {
 		if initial <= 0 {
@@ -142,6 +177,9 @@ func WithBackoff(initial, max time.Duration) Option {
 	}
 }
 
+// WithPollWait sets the initial wait and the overall max wait for PollProcesses.
+// Zero/negative inputs fall back to library defaults. If max < initial,
+// max is promoted to initial.
 func WithPollWait(initial, max time.Duration) Option {
 	return func(c *Client) error {
 		if initial <= 0 {
@@ -159,8 +197,9 @@ func WithPollWait(initial, max time.Duration) Option {
 	}
 }
 
-// NewClient builds a client with defaults, then applies options.
-// Zero values from options are treated as *explicit* values, not “unset”.
+// NewClient builds a Client with sensible defaults and applies the provided
+// options in order. Empty values in options are treated as explicit and may
+// override defaults (e.g., MaxRetries=0 disables retries).
 func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	token = strings.TrimSpace(token)
 	projectID = strings.TrimSpace(projectID)
@@ -193,7 +232,7 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 		}
 	}
 
-	// final normalization
+	// final normalization (in case WithBaseURL was not used)
 	if !strings.HasSuffix(c.BaseURL, "/") {
 		c.BaseURL += "/"
 	}
@@ -201,6 +240,13 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
+// PollProcesses polls one or more process IDs until they reach a terminal
+// status or the overall poll budget (PollMaxWait) is exhausted.
+// It returns a result for each input ID, preserving input order.
+// Terminal statuses considered: "finished" and "failed".
+//
+// Errors from individual GET requests are ignored and retried on the next loop.
+// Context cancellation (ctx.Done) aborts the whole poll with ctx.Err().
 func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
 	start := time.Now()
 
@@ -281,7 +327,6 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 		if sleep > remaining {
 			sleep = remaining
 		}
-
 		if sleep <= 0 {
 			sleep = 10 * time.Millisecond // tiny floor to avoid spin
 		}
@@ -298,7 +343,6 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 				next = 10 * time.Millisecond
 			}
 			wait = next
-
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -314,6 +358,9 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 	return results, nil
 }
 
+// doWithRetry executes one HTTP operation with buffered body and retries
+// according to the client's backoff policy. v is decoded into on success.
+// method/path should be relative (e.g., "projects/<id>/...").
 func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.Reader, v any) error {
 	var payload []byte
 	if body != nil {
@@ -333,32 +380,33 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 			headers.Set("Content-Type", "application/json")
 		}
 
-		err := c.doRequest(ctx, method, path, rdr, v, headers)
-		if err != nil {
+		if err := c.doRequest(ctx, method, path, rdr, v, headers); err != nil {
 			return err
 		}
-
 		return nil
 	}, nil)
 	if err != nil {
 		return err
 	}
-
 	return nil
 }
 
-// doRequest performs a single HTTP request, no retries.
+// doRequest performs a single HTTP request (no retries).
+// Body is sent as-is; if it's a bytes.Reader/strings.Reader/bytes.Buffer, we
+// set Content-Length for nicer traces and potential connection reuse.
+// If v is nil, the body is drained and discarded; otherwise it is decoded as JSON.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any, headers http.Header) error {
-	fullUrl, err := url.JoinPath(c.BaseURL, path)
+	fullURL, err := url.JoinPath(c.BaseURL, path)
 	if err != nil {
 		return fmt.Errorf("join url: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, fullUrl, body)
+	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	if body != nil {
+		// Best-effort Content-Length for common reader types
 		if br, ok := body.(*bytes.Reader); ok {
 			req.ContentLength = int64(br.Len())
 		}
@@ -383,9 +431,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	if err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
@@ -404,13 +450,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	// Read full body once; classify empty vs truncated vs valid JSON
 	b, rerr := io.ReadAll(resp.Body)
 	if rerr != nil {
-		// If the server closed early (truncated body), bubble this up as-is so the
-		// retry layer can decide
+		// Server closed early (truncated) – bubble up for retry layer to decide.
 		return fmt.Errorf("read response: %w", rerr)
 	}
 
 	if len(bytes.TrimSpace(b)) == 0 {
-		// 204 or empty JSON body, treat as success
+		// 204 or empty JSON body – treat as success.
 		return nil
 	}
 
@@ -422,8 +467,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 }
 
 // withExpBackoff runs op with retries using exponential backoff + jitter.
-// Semantics: MaxRetries = number of *retries* after the initial attempt,
-// so total attempts = MaxRetries + 1.
+// Semantics: MaxRetries is the number of *retries* after the initial attempt,
+// so total attempts = MaxRetries + 1. A nil isRetryable defaults to apierr.IsRetryable.
+// If ctx is canceled, the function returns ctx.Err().
 func (c *Client) withExpBackoff(
 	ctx context.Context,
 	label string,
@@ -456,7 +502,7 @@ func (c *Client) withExpBackoff(
 		}
 
 		// If it's not retryable or we've exhausted retries, bail.
-		// attempt counts the *completed* attempts so far; we allow up to MaxRetries retries.
+		// attempt counts completed attempts; allow up to MaxRetries retries.
 		if !isRetryable(lastErr) || attempt >= c.MaxRetries {
 			if label != "" {
 				// attempt+1 = human-readable total attempts performed
@@ -502,7 +548,7 @@ func (c *Client) withExpBackoff(
 	}
 }
 
-// helper to build "projects/{id}/<suffix>"
+// projectPath builds "projects/{id}/<suffix>" for project-scoped endpoints.
 func (c *Client) projectPath(suffix string) string {
 	return fmt.Sprintf("projects/%s/%s", c.ProjectID, suffix)
 }
