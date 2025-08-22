@@ -31,7 +31,7 @@ func NewUploader(c *Client) *Uploader {
 	}
 }
 
-func (u *Uploader) Upload(ctx context.Context, params UploadParams) (string, error) {
+func (u *Uploader) Upload(ctx context.Context, params UploadParams, poll bool) (string, error) {
 	// copy to avoid mutating caller's map
 	body := make(map[string]any, len(params)+1)
 	maps.Copy(body, params)
@@ -87,6 +87,11 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams) (string, err
 	processID := resp.Process.ProcessID
 	if strings.TrimSpace(processID) == "" {
 		return "", fmt.Errorf("upload: empty process id in response")
+	}
+
+	// If caller doesn’t want to poll, we’re done here.
+	if !poll {
+		return processID, nil
 	}
 
 	// Poll this single process until it finishes or times out

@@ -60,7 +60,7 @@ pid, err := uploader.Upload(ctx, client.UploadParams{
     "filename": fp,
     "lang_iso": "en",
     // add other API params ...
-})
+}, true) // set to false to disable process polling
 if err != nil {
     log.Fatal(err)
 }

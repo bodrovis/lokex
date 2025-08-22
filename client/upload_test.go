@@ -91,12 +91,66 @@ func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	pid, err := u.Upload(ctx, params)
+	pid, err := u.Upload(ctx, params, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if pid != "upl_123" {
 		t.Fatalf("process id = %q, want upl_123", pid)
+	}
+}
+
+func TestUploader_Upload_NoPoll(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	// kickoff returns nested process id
+	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", req.Method)
+		}
+		if got := req.Header.Get("X-Api-Token"); got != token {
+			t.Fatalf("X-Api-Token = %q, want %q", got, token)
+		}
+
+		var got map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+			t.Fatalf("decode req: %v", err)
+		}
+		if got["filename"] == "" {
+			t.Fatalf("missing filename")
+		}
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"upl_456"}}`), nil
+	})
+
+	cli, err := client.NewClient(token, projectID, client.WithHTTPTimeout(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := client.NewUploader(cli)
+
+	// temp file
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "en.json")
+	if err := os.WriteFile(fp, []byte(`{"hello":"world"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	params := client.UploadParams{
+		"filename": fp,
+		"lang_iso": "en",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	pid, err := u.Upload(ctx, params, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pid != "upl_456" {
+		t.Fatalf("process id = %q, want upl_456", pid)
 	}
 }
 
@@ -141,7 +195,7 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 		"data":     "dGVzdA==", // "test"
 	}
 
-	if _, err := u.Upload(context.Background(), params); err != nil {
+	if _, err := u.Upload(context.Background(), params, true); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 }
@@ -181,7 +235,7 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 		"data":     []byte("XYZ"),
 	}
 
-	if _, err := u.Upload(context.Background(), params); err != nil {
+	if _, err := u.Upload(context.Background(), params, true); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 }
@@ -192,7 +246,7 @@ func TestUploader_Upload_MissingFilename(t *testing.T) {
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"lang_iso": "en",
-	})
+	}, true)
 	if err == nil || !strings.Contains(err.Error(), "missing 'filename'") {
 		t.Fatalf("want missing filename error, got %v", err)
 	}
@@ -206,7 +260,7 @@ func TestUploader_Upload_DirectoryIsError(t *testing.T) {
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": dir,
 		"lang_iso": "en",
-	})
+	}, true)
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("want directory error, got %v", err)
 	}
@@ -241,7 +295,7 @@ func TestUploader_Upload_TimeoutWhilePolling(t *testing.T) {
 	_, err := u.Upload(ctx, client.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
-	})
+	}, true)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want context deadline, got %v", err)
 	}
@@ -290,7 +344,7 @@ func TestIntegration_Upload(t *testing.T) {
 	pid, err := u.Upload(ctx, client.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("integration upload failed: %v", err)
 	}
