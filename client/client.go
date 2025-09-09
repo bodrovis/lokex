@@ -50,7 +50,7 @@ type Client struct {
 	ProjectID       string        // default project ID for project-scoped endpoints
 	UserAgent       string        // User-Agent header value
 	HTTPClient      *http.Client  // underlying HTTP client
-	MaxRetries      int           // number of *retries* after first attempt
+	MaxRetries      int           // number of retries after first attempt
 	InitialBackoff  time.Duration // first backoff duration for withExpBackoff
 	MaxBackoff      time.Duration // cap for backoff (and jittered sleep)
 	PollInitialWait time.Duration // initial wait between PollProcesses rounds
