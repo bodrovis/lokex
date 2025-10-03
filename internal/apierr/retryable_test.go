@@ -94,7 +94,6 @@ func TestIsRetryable_FlakyIO(t *testing.T) {
 		io.ErrClosedPipe,
 		syscall.ECONNRESET,
 		syscall.ECONNABORTED,
-		// NOTE: syscall.EPIPE is unix-only; skip to keep this test portable.
 	}
 	for _, e := range errs {
 		if !apierr.IsRetryable(e) {
