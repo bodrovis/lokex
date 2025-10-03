@@ -153,7 +153,7 @@ func makeZip(t *testing.T, entries []zentry) string {
 	if err != nil {
 		t.Fatalf("create temp zip: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	zw := zip.NewWriter(f)
 	for _, e := range entries {

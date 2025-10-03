@@ -4,6 +4,7 @@ package zipx
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,12 +34,20 @@ func DefaultPolicy() Policy {
 
 // Validate checks that zipPath is a readable ZIP file.
 // Returns io.ErrUnexpectedEOF if it is not.
-func Validate(zipPath string) error {
+func Validate(zipPath string) (err error) {
 	zr, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return fmt.Errorf("zip validate: %w", io.ErrUnexpectedEOF)
+		if errors.Is(err, zip.ErrFormat) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("zip validate: %w", io.ErrUnexpectedEOF)
+		}
+		return fmt.Errorf("zip validate open: %w", err)
 	}
-	zr.Close()
+	defer func() {
+		if cerr := zr.Close(); err == nil && cerr != nil {
+			err = fmt.Errorf("zip validate close: %w", cerr)
+		}
+	}()
+
 	return nil
 }
 
@@ -49,7 +58,12 @@ func Unzip(srcZip, destDir string, p Policy) error {
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+
+	defer func() {
+		if cerr := r.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("close zip: %w", cerr))
+		}
+	}()
 
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return err
@@ -122,7 +136,7 @@ func Unzip(srcZip, destDir string, p Policy) error {
 
 		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
 		if err != nil {
-			rc.Close()
+			_ = rc.Close()
 			return err
 		}
 
