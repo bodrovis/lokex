@@ -204,7 +204,7 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 				if !os.IsNotExist(err) {
 					return fmt.Errorf("symlink parent resolve error: %w", err)
 				}
-				// If parent doesn't exist, mkdirall above does it, so we fallback to intendeed parent
+				// If parent doesn't exist, mkdirall above does it, so we fallback to intended parent
 				parentResolved = filepath.Dir(targetAbs)
 			}
 			linkAbs := filepath.Join(parentResolved, filepath.Base(targetAbs))

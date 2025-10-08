@@ -24,7 +24,7 @@ const (
 	defaultBaseURL = "https://api.lokalise.com/api2/"
 
 	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
-	defaultUserAgent = "lokex/1.0.1"
+	defaultUserAgent = "lokex/1.0.2"
 
 	// defaultErrCap caps how many bytes we slurp from a non-2xx response when
 	// constructing an apierr.APIError.
