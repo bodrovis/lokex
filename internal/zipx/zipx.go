@@ -83,6 +83,11 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 	for _, f := range r.File {
 		// --- Normalize and validate path ---
 		name := strings.ReplaceAll(f.Name, `\`, `/`)
+
+		// reject null bytes (defensive)
+		if strings.IndexByte(name, 0) != -1 {
+			return fmt.Errorf("invalid file name (NUL) in zip: %q", f.Name)
+		}
 		rel := path.Clean(name)
 
 		// strip leading "/" and "./"
@@ -92,8 +97,10 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		if rel == "" || rel == "." {
 			continue
 		}
-		if strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
-			return fmt.Errorf("unsafe path traversal in zip: %q", f.Name)
+		for seg := range strings.SplitSeq(rel, "/") {
+			if seg == ".." {
+				return fmt.Errorf("unsafe path traversal in zip (.. segment): %q", f.Name)
+			}
 		}
 
 		cand := filepath.FromSlash(rel)
