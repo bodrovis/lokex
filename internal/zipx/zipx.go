@@ -53,19 +53,19 @@ func Validate(zipPath string) (err error) {
 
 // Unzip extracts srcZip into destDir according to policy p.
 // It enforces limits, prevents zip-slip, and skips unsafe entries.
-func Unzip(srcZip, destDir string, p Policy) error {
+func Unzip(srcZip, destDir string, p Policy) (err error) {
 	r, err := zip.OpenReader(srcZip)
 	if err != nil {
 		return err
 	}
-
 	defer func() {
 		if cerr := r.Close(); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("close zip: %w", cerr))
 		}
 	}()
 
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	// Create root dir with conservative perms
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return err
 	}
 
@@ -74,56 +74,116 @@ func Unzip(srcZip, destDir string, p Policy) error {
 		return err
 	}
 
-	if len(r.File) > p.MaxFiles {
+	if p.MaxFiles > 0 && len(r.File) > p.MaxFiles {
 		return fmt.Errorf("zip too many files: %d", len(r.File))
 	}
 
-	var total int64
-	for _, f := range r.File {
-		if f.UncompressedSize64 > uint64(p.MaxFileBytes) {
-			return fmt.Errorf("zip entry too big: %s (%d bytes)", f.Name, f.UncompressedSize64)
-		}
-		total += int64(f.UncompressedSize64)
-		if total > p.MaxTotalBytes {
-			return fmt.Errorf("zip too large uncompressed: %d", total)
-		}
+	var totalWritten int64
 
-		rel := path.Clean(f.Name)
-		rel = strings.TrimPrefix(rel, "/")
-		rel = strings.TrimPrefix(rel, "./")
-		if rel == "." || rel == "" {
+	for _, f := range r.File {
+		// --- Normalize and validate path ---
+		name := strings.ReplaceAll(f.Name, `\`, `/`)
+		rel := path.Clean(name)
+
+		// strip leading "/" and "./"
+		for strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "./") {
+			rel = strings.TrimPrefix(strings.TrimPrefix(rel, "/"), "./")
+		}
+		if rel == "" || rel == "." {
 			continue
 		}
-		targetPath := filepath.Join(destDir, rel)
+		if strings.HasPrefix(rel, "../") || strings.Contains(rel, "/../") {
+			return fmt.Errorf("unsafe path traversal in zip: %q", f.Name)
+		}
 
-		targetAbs, err := filepath.Abs(targetPath)
+		cand := filepath.FromSlash(rel)
+		// absolute or has volume name (Windows/UNC)
+		if filepath.IsAbs(cand) || filepath.VolumeName(cand) != "" {
+			return fmt.Errorf("unsafe absolute path in zip: %q", f.Name)
+		}
+		nativePath := filepath.Join(destDir, cand)
+
+		// header hints — soft checks (still enforce per-file cap via copy)
+		if p.MaxFileBytes > 0 && int64(f.UncompressedSize64) > p.MaxFileBytes {
+			return fmt.Errorf("zip entry too big by header: %s (%d bytes)", f.Name, f.UncompressedSize64)
+		}
+
+		targetAbs, err := filepath.Abs(nativePath)
 		if err != nil {
 			return err
 		}
+		// must be within destAbs
 		if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(filepath.Separator)) {
-			return fmt.Errorf("unsafe path in zip: %q", f.Name)
+			return fmt.Errorf("unsafe path escape: %q", f.Name)
 		}
 
 		info := f.FileInfo()
+		mode := info.Mode()
+
+		// Make sure parent exists
 		if info.IsDir() {
 			if err := os.MkdirAll(targetAbs, 0o755); err != nil {
 				return err
 			}
+			// Optional: preserve times for dirs
+			if p.PreserveTimes && !f.Modified.IsZero() {
+				_ = os.Chtimes(targetAbs, f.Modified, f.Modified)
+			}
 			continue
 		}
-
-		mode := info.Mode()
-		if !p.AllowSymlinks && (mode&os.ModeSymlink != 0) {
-			continue
-		}
-		if mode&(os.ModeDevice|os.ModeNamedPipe|os.ModeSocket) != 0 {
-			continue
-		}
-
 		if err := os.MkdirAll(filepath.Dir(targetAbs), 0o755); err != nil {
 			return err
 		}
 
+		// Parents must not contain symlinks that leave dest, ALWAYS check
+		if bad, derr := pathHasSymlinkOutside(destAbs, targetAbs); derr == nil && bad {
+			return fmt.Errorf("unsafe symlink in parents for: %q", f.Name)
+		} else if derr != nil && !os.IsNotExist(derr) { // not-exist is fine mid-extract
+			return derr
+		}
+
+		// Skip device/pipe/socket entries outright
+		if mode&(os.ModeDevice|os.ModeNamedPipe|os.ModeSocket) != 0 {
+			continue
+		}
+
+		// Handle symlinks explicitly if allowed; otherwise skip them
+		if mode&os.ModeSymlink != 0 {
+			if !p.AllowSymlinks {
+				continue
+			}
+			rc, err := f.Open()
+			if err != nil {
+				return err
+			}
+			// Protect against huge "targets" embedded as content
+			const maxLinkTarget = 1 << 20 // 1 MiB safety cap
+			linkTargetBytes, rerr := io.ReadAll(io.LimitReader(rc, maxLinkTarget))
+			_ = rc.Close()
+			if rerr != nil {
+				return fmt.Errorf("read symlink target: %w", rerr)
+			}
+			linkTarget := strings.TrimSpace(string(linkTargetBytes))
+			if linkTarget == "" {
+				return fmt.Errorf("empty symlink target: %q", f.Name)
+			}
+			// No absolute/volume targets
+			if filepath.IsAbs(linkTarget) || filepath.VolumeName(linkTarget) != "" {
+				return fmt.Errorf("absolute symlink target not allowed: %q -> %q", f.Name, linkTarget)
+			}
+			// Normalize a bit (keep relative)
+			// If symlink target escapes on resolution at runtime, parent check above still blocks via EvalSymlinks
+			_ = os.Remove(targetAbs) // best-effort replace
+			if err := os.Symlink(linkTarget, targetAbs); err != nil {
+				return fmt.Errorf("create symlink: %w", err)
+			}
+			if p.PreserveTimes && !f.Modified.IsZero() {
+				_ = os.Chtimes(targetAbs, f.Modified, f.Modified)
+			}
+			continue
+		}
+
+		// Handle regular file (and "unknown regular")
 		rc, err := f.Open()
 		if err != nil {
 			return err
@@ -134,30 +194,76 @@ func Unzip(srcZip, destDir string, p Policy) error {
 			perm = 0o644
 		}
 
-		out, err := os.OpenFile(targetAbs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, perm)
+		tmp := targetAbs + ".partial"
+		// Create tmp file exclusively to avoid races/truncation
+		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|os.O_EXCL, perm)
 		if err != nil {
 			_ = rc.Close()
 			return err
 		}
 
-		written, copyErr := copyCapped(out, rc, p.MaxFileBytes)
-		defer func() { _ = rc.Close() }()
-		if cerr := out.Close(); copyErr == nil && cerr != nil {
-			copyErr = cerr
+		n, werr := copyCapped(out, rc, p.MaxFileBytes)
+		// close writers/readers with proper precedence
+		if cerr := out.Close(); werr == nil && cerr != nil {
+			werr = cerr
 		}
-		if copyErr != nil {
-			return copyErr
+		if cerr := rc.Close(); werr == nil && cerr != nil {
+			werr = cerr
+		}
+		if werr != nil {
+			_ = os.Remove(tmp)
+			return werr
 		}
 
-		_ = written
+		// Update actual total written and enforce cap
+		totalWritten += n
+		if p.MaxTotalBytes > 0 && totalWritten > p.MaxTotalBytes {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("zip too large uncompressed (actual): %d > %d", totalWritten, p.MaxTotalBytes)
+		}
 
-		if p.PreserveTimes {
-			if !f.Modified.IsZero() {
-				_ = os.Chtimes(targetAbs, f.Modified, f.Modified)
-			}
+		// Atomically move into place
+		if err := os.Rename(tmp, targetAbs); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+
+		if p.PreserveTimes && !f.Modified.IsZero() {
+			_ = os.Chtimes(targetAbs, f.Modified, f.Modified)
 		}
 	}
 	return nil
+}
+
+func pathHasSymlinkOutside(destRoot, file string) (bool, error) {
+	rel, err := filepath.Rel(destRoot, file)
+	if err != nil {
+		return true, err
+	}
+	cur := destRoot
+	for seg := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		if seg == "" || seg == "." {
+			continue
+		}
+		cur = filepath.Join(cur, seg)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return false, err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			real, err := filepath.EvalSymlinks(cur)
+			if err != nil {
+				return true, err
+			}
+			if real != destRoot && !strings.HasPrefix(real, destRoot+string(filepath.Separator)) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // copyCapped copies from src to dst up to max bytes,
