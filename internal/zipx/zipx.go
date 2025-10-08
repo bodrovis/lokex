@@ -13,6 +13,16 @@ import (
 	"strings"
 )
 
+// isPathWithinBase checks if absPath (absolute, resolved) is under baseAbs (absolute, resolved)
+func isPathWithinBase(baseAbs, absPath string) bool {
+	rel, err := filepath.Rel(baseAbs, absPath)
+	if err != nil {
+		return false
+	}
+	relClean := filepath.Clean(rel)
+	return relClean != ".." && !strings.HasPrefix(relClean, ".."+string(filepath.Separator))
+}
+
 // Policy defines extraction limits and behavior.
 type Policy struct {
 	MaxFiles      int   // maximum number of files allowed
@@ -181,6 +191,28 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 			// Normalize a bit (keep relative)
 			// If symlink target escapes on resolution at runtime, parent check above still blocks via EvalSymlinks
 			_ = os.Remove(targetAbs) // best-effort replace
+
+			// -- Fix: Check resolved destination and symlink target before creating symlink --
+			// 1. Resolve parent directory's symlinks (already extracted so far).
+			parentResolved, err := filepath.EvalSymlinks(filepath.Dir(targetAbs))
+			if err != nil {
+				if !os.IsNotExist(err) {
+					return fmt.Errorf("symlink parent resolve error: %w", err)
+				}
+				// If parent doesn't exist, mkdirall above does it, so we fallback to intendeed parent
+				parentResolved = filepath.Dir(targetAbs)
+			}
+			linkAbs := filepath.Join(parentResolved, filepath.Base(targetAbs))
+			if !isPathWithinBase(destAbs, linkAbs) {
+				return fmt.Errorf("symlink destination escapes extraction root: %q", linkAbs)
+			}
+			// 2. Where would the symlink, if created, point to? (Relative to resolved parent.)
+			targetCandidate := filepath.Join(parentResolved, linkTarget)
+			// We can't EvalSymlinks on the new symlink yet, but check that the _synthetic resolution_ is within destAbs.
+			if !isPathWithinBase(destAbs, targetCandidate) {
+				return fmt.Errorf("symlink target escapes extraction root: %q -> %q", f.Name, linkTarget)
+			}
+
 			if err := os.Symlink(linkTarget, targetAbs); err != nil {
 				return fmt.Errorf("create symlink: %w", err)
 			}
