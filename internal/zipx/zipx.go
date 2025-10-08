@@ -84,6 +84,11 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		return err
 	}
 
+	destReal := destAbs
+	if dr, err := filepath.EvalSymlinks(destAbs); err == nil && dr != "" {
+		destReal = dr
+	}
+
 	if p.MaxFiles > 0 && len(r.File) > p.MaxFiles {
 		return fmt.Errorf("zip too many files: %d", len(r.File))
 	}
@@ -129,8 +134,8 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		if err != nil {
 			return err
 		}
-		// must be within destAbs
-		if targetAbs != destAbs && !strings.HasPrefix(targetAbs, destAbs+string(filepath.Separator)) {
+		// must be within destReal
+		if targetAbs != destReal && !strings.HasPrefix(targetAbs, destReal+string(filepath.Separator)) {
 			return fmt.Errorf("unsafe path escape: %q", f.Name)
 		}
 
@@ -153,7 +158,7 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		}
 
 		// Parents must not contain symlinks that leave dest, ALWAYS check
-		if bad, derr := pathHasSymlinkOutside(destAbs, targetAbs); derr == nil && bad {
+		if bad, derr := pathHasSymlinkOutside(destReal, targetAbs); derr == nil && bad {
 			return fmt.Errorf("unsafe symlink in parents for: %q", f.Name)
 		} else if derr != nil && !os.IsNotExist(derr) { // not-exist is fine mid-extract
 			return derr
@@ -203,21 +208,18 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 				parentResolved = filepath.Dir(targetAbs)
 			}
 			linkAbs := filepath.Join(parentResolved, filepath.Base(targetAbs))
-			if !isPathWithinBase(destAbs, linkAbs) {
+			if !isPathWithinBase(destReal, linkAbs) {
 				return fmt.Errorf("symlink destination escapes extraction root: %q", linkAbs)
 			}
 			// 2. Where would the symlink, if created, point to? (Relative to resolved parent.)
 			targetCandidate := filepath.Join(parentResolved, linkTarget)
-			// We can't EvalSymlinks on the new symlink yet, but check that the _synthetic resolution_ is within destAbs.
-			if !isPathWithinBase(destAbs, targetCandidate) {
+			// We can't EvalSymlinks on the new symlink yet, but check that the _synthetic resolution_ is within destReal.
+			if !isPathWithinBase(destReal, targetCandidate) {
 				return fmt.Errorf("symlink target escapes extraction root: %q -> %q", f.Name, linkTarget)
 			}
 
 			if err := os.Symlink(linkTarget, targetAbs); err != nil {
 				return fmt.Errorf("create symlink: %w", err)
-			}
-			if p.PreserveTimes && !f.Modified.IsZero() {
-				_ = os.Chtimes(targetAbs, f.Modified, f.Modified)
 			}
 			continue
 		}
