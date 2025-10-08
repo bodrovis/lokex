@@ -112,7 +112,7 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		if rel == "" || rel == "." {
 			continue
 		}
-		for _, seg := range strings.Split(rel, "/") {
+		for seg := range strings.SplitSeq(rel, "/") {
 			if seg == ".." {
 				return fmt.Errorf("unsafe path traversal in zip (.. segment): %q", f.Name)
 			}
