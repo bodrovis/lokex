@@ -112,7 +112,7 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		if rel == "" || rel == "." {
 			continue
 		}
-		for seg := range strings.SplitSeq(rel, "/") {
+		for _, seg := range strings.Split(rel, "/") {
 			if seg == ".." {
 				return fmt.Errorf("unsafe path traversal in zip (.. segment): %q", f.Name)
 			}
@@ -134,8 +134,8 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 		if err != nil {
 			return err
 		}
-		// must be within destReal
-		if targetAbs != destReal && !strings.HasPrefix(targetAbs, destReal+string(filepath.Separator)) {
+		// must be strictly within destReal
+		if !isPathWithinBase(destReal, targetAbs) {
 			return fmt.Errorf("unsafe path escape: %q", f.Name)
 		}
 
