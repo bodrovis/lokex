@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -506,23 +505,10 @@ func TestIntegration_Upload(t *testing.T) {
 	}
 	u := client.NewUploader(cli)
 
-	// make sure testdata/ exists
-	if err := os.MkdirAll("testdata", 0o755); err != nil {
-		t.Fatal(err)
-	}
+	// Each test gets its own private directory that Go deletes automatically.
+	dir := t.TempDir()
 
-	// create a unique temp dir under testdata/
-	dir, err := os.MkdirTemp("testdata", "lokex-upload-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// cleanup logic: remove the subdir and testdata if it ends up empty
-	t.Cleanup(func() {
-		_ = os.RemoveAll(dir)
-		_ = removeIfEmpty("testdata")
-	})
-
+	// Create the file inside the temp directory.
 	fp := filepath.Join(dir, "en.json")
 	if err := os.WriteFile(fp, []byte(`{"hello":"lokalise"}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -541,18 +527,4 @@ func TestIntegration_Upload(t *testing.T) {
 	if pid == "" {
 		t.Fatalf("expected non-empty process id")
 	}
-}
-
-func removeIfEmpty(path string) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	_, err = f.Readdirnames(1)
-	if err == io.EOF {
-		return os.Remove(path)
-	}
-	return err
 }

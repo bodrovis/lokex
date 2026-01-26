@@ -2,6 +2,7 @@ package utils_test
 
 import (
 	"encoding/json"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -19,21 +20,29 @@ func TestEncodeJSONBody_DisablesHTMLEscaping_AndAddsNewline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeJSONBody error: %v", err)
 	}
-	out := buf.String()
+
+	// bytes.Reader → читаем вручную
+	outBytes, err := io.ReadAll(buf)
+	if err != nil {
+		t.Fatalf("read encoded json: %v", err)
+	}
+	out := string(outBytes)
 
 	// 1) No HTML escaping
-	if strings.Contains(out, `\u003c`) || strings.Contains(out, `\u003e`) || strings.Contains(out, `\u0026`) {
+	if strings.Contains(out, `\u003c`) ||
+		strings.Contains(out, `\u003e`) ||
+		strings.Contains(out, `\u0026`) {
 		t.Fatalf("found escaped HTML in output: %q", out)
 	}
 
-	// 2) Ends with newline (json.Encoder.Encode behavior)
+	// 2) Ends with newline
 	if !strings.HasSuffix(out, "\n") {
 		t.Fatalf("output must end with newline, got: %q", out)
 	}
 
-	// 3) Round-trip sanity: it should be valid JSON
+	// 3) Round-trip sanity
 	var rt map[string]any
-	if err := json.Unmarshal([]byte(out), &rt); err != nil {
+	if err := json.Unmarshal(outBytes, &rt); err != nil {
 		t.Fatalf("round-trip unmarshal failed: %v\npayload: %q", err, out)
 	}
 }
