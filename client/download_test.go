@@ -589,20 +589,24 @@ func TestIntegration_Download(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")
 	}
+	if token == "secret" || projectID == "123.abc" {
+		t.Skip("no real Lokalise credentials; skipping integration test")
+	}
 
 	cli, err := client.NewClient(token, projectID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	d := client.NewDownloader(cli)
+	dl := client.NewDownloader(cli)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	localesDir := filepath.Join("./", "locales")
+	// Per-test temp dir; Go removes it automatically.
+	destRoot := t.TempDir()
+	localesDir := filepath.Join(destRoot, "locales")
 
-	url, err := d.Download(ctx, localesDir, client.DownloadParams{
+	url, err := dl.Download(ctx, localesDir, client.DownloadParams{
 		"format": "json",
 	})
 	if err != nil {
@@ -612,7 +616,6 @@ func TestIntegration_Download(t *testing.T) {
 		t.Fatalf("unexpected bundle URL: %q", url)
 	}
 
-	// 1) locales exists and is not empty
 	entries, err := os.ReadDir(localesDir)
 	if err != nil {
 		t.Fatalf("cannot read locales dir: %v", err)
@@ -621,10 +624,12 @@ func TestIntegration_Download(t *testing.T) {
 		t.Fatalf("locales dir is empty")
 	}
 
-	// 2) recursively ensure at least one regular file exists
 	foundFile := false
-	err = filepath.WalkDir(localesDir, func(path string, d os.DirEntry, _ error) error {
-		if !d.IsDir() {
+	err = filepath.WalkDir(localesDir, func(path string, de os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !de.IsDir() {
 			foundFile = true
 		}
 		return nil
@@ -641,19 +646,24 @@ func TestIntegration_DownloadAsync(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in -short mode")
 	}
+	if token == "secret" || projectID == "123.abc" {
+		t.Skip("no real Lokalise credentials; skipping integration test")
+	}
 
 	cli, err := client.NewClient(token, projectID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := client.NewDownloader(cli)
+	dl := client.NewDownloader(cli)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	localesDir := filepath.Join("./", "locales-async")
+	// Per-test temp dir; Go removes it automatically.
+	destRoot := t.TempDir()
+	localesDir := filepath.Join(destRoot, "locales-async")
 
-	url, err := d.DownloadAsync(ctx, localesDir, client.DownloadParams{
+	url, err := dl.DownloadAsync(ctx, localesDir, client.DownloadParams{
 		"format": "json",
 	})
 	if err != nil {
@@ -663,7 +673,6 @@ func TestIntegration_DownloadAsync(t *testing.T) {
 		t.Fatalf("unexpected bundle URL: %q", url)
 	}
 
-	// 1) locales exists and is not empty
 	entries, err := os.ReadDir(localesDir)
 	if err != nil {
 		t.Fatalf("cannot read locales dir: %v", err)
@@ -672,10 +681,12 @@ func TestIntegration_DownloadAsync(t *testing.T) {
 		t.Fatalf("locales dir is empty")
 	}
 
-	// 2) recursively ensure at least one regular file exists
 	foundFile := false
-	err = filepath.WalkDir(localesDir, func(path string, d os.DirEntry, _ error) error {
-		if !d.IsDir() {
+	err = filepath.WalkDir(localesDir, func(path string, de os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !de.IsDir() {
 			foundFile = true
 		}
 		return nil
