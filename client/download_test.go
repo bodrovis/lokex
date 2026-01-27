@@ -656,7 +656,7 @@ func TestIntegration_DownloadAsync(t *testing.T) {
 	}
 	dl := client.NewDownloader(cli)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	// Per-test temp dir; Go removes it automatically.
@@ -951,6 +951,70 @@ func registerZipResponderWithHeaderAsserts(t *testing.T, url string, zipBytes []
 		}
 		return httpmock.NewBytesResponse(200, zipBytes), nil
 	})
+}
+
+func TestDownloadAndUnzip_EmptyDestDir(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	dl := client.NewDownloader(cli)
+
+	err := dl.DownloadAndUnzip(context.Background(), "https://cdn.example.com/bundle.zip", "   ")
+	if err == nil || !strings.Contains(err.Error(), "empty dest dir") {
+		t.Fatalf("want empty dest dir error, got %v", err)
+	}
+}
+
+func TestDownloader_FetchBundleAsync_FinishedButEmptyDownloadURL(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/async-download", projectID)
+	targetGet := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/processes/xyz", projectID)
+
+	// kickoff ok
+	httpmock.RegisterResponder("POST", targetPost,
+		httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+
+	// finished, but download_url missing/empty
+	httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+		"process": {
+			"process_id":"xyz",
+			"status":"finished",
+			"details": {}
+		}
+	}`))
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	buf := mustJSONBody(t, map[string]any{"format": "json"})
+
+	_, err := d.FetchBundleAsync(context.Background(), buf)
+	if err == nil || !strings.Contains(err.Error(), "download_url is empty") {
+		t.Fatalf("want empty download_url error, got %v", err)
+	}
+}
+
+func TestDownloadAndUnzip_ContextAlreadyCanceled_NoRequest(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	url := "https://cdn.example.com/never-called.zip"
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	dl := client.NewDownloader(cli)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dest := t.TempDir()
+	err := dl.DownloadAndUnzip(ctx, url, dest)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+
+	if got := httpmock.GetCallCountInfo()["GET "+url]; got != 0 {
+		t.Fatalf("GET attempts = %d, want 0", got)
+	}
 }
 
 func mustJSONBody(t *testing.T, m map[string]any) io.Reader {

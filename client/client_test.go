@@ -278,3 +278,89 @@ func TestPollProcesses_ContextCancel(t *testing.T) {
 		t.Fatalf("expected context error, got nil")
 	}
 }
+
+func TestPollProcesses_DuplicatesAndEmpty_PreservesOrder(t *testing.T) {
+	project := "p"
+	token := "t"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/projects/p/processes/a":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"process":{"process_id":"a","status":"finished","message":"","details":{}}}`))
+		case "/projects/p/processes/b":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"process":{"process_id":"b","status":"finished","message":"","details":{}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.NewClient(token, project,
+		client.WithBaseURL(srv.URL),
+		client.WithHTTPClient(srv.Client()),
+		client.WithPollWait(5*time.Millisecond, 200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+
+	got, err := c.PollProcesses(context.Background(), []string{"a", "", "a", "b", "a"})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+
+	// empty IDs are skipped; duplicates preserved
+	if len(got) != 4 {
+		t.Fatalf("len=%d, want 4; got=%#v", len(got), got)
+	}
+	want := []string{"a", "a", "b", "a"}
+	for i := range want {
+		if got[i].ProcessID != want[i] {
+			t.Fatalf("order mismatch at %d: got %q want %q; full=%#v", i, got[i].ProcessID, want[i], got)
+		}
+	}
+}
+
+func TestPollProcesses_NonRetryableError_MarksFailedAndContinues(t *testing.T) {
+	project := "p"
+	token := "t"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/projects/p/processes/x":
+			// 404 is non-retryable -> should mark failed and stop polling x
+			http.NotFound(w, r)
+		case "/projects/p/processes/y":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"process":{"process_id":"y","status":"finished","message":"","details":{}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := client.NewClient(token, project,
+		client.WithBaseURL(srv.URL),
+		client.WithHTTPClient(srv.Client()),
+		client.WithPollWait(5*time.Millisecond, 200*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+
+	got, err := c.PollProcesses(context.Background(), []string{"x", "y"})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("len=%d, want 2; got=%#v", len(got), got)
+	}
+	if got[0].ProcessID != "x" || got[0].Status != client.StatusFailed {
+		t.Fatalf("x: got=%#v, want failed", got[0])
+	}
+	if got[1].ProcessID != "y" || got[1].Status != client.StatusFinished {
+		t.Fatalf("y: got=%#v, want finished", got[1])
+	}
+}

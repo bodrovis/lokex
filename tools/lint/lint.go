@@ -6,47 +6,38 @@ import (
 	"os/exec"
 )
 
-func runCommand(cmd string, args []string) error {
-	command := exec.Command(cmd, args...)
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("error running %s %v: %v", cmd, args, err)
-	}
-	return nil
+func run(cmd string, args ...string) error {
+	c := exec.Command(cmd, args...)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
+}
+
+func ensureInstalled(bin string) bool {
+	_, err := exec.LookPath(bin)
+	return err == nil
 }
 
 func main() {
-	fmt.Println("Running go fmt...")
-	if err := runCommand("go", []string{"fmt", "./..."}); err != nil {
-		fmt.Println(err)
-	}
-
 	fmt.Println("Running go vet...")
-	if err := runCommand("go", []string{"vet", "./..."}); err != nil {
-		fmt.Println(err)
+	_ = run("go", "vet", "./...")
+
+	fmt.Println("Running golangci-lint...")
+	_ = run("golangci-lint", "run")
+
+	if ensureInstalled("staticcheck") {
+		fmt.Println("Running staticcheck...")
+		_ = run("staticcheck", "./...")
+	} else {
+		fmt.Println("staticcheck not installed (skip)")
 	}
 
-	fmt.Println("Running custom linters...")
-	if err := runCommand("golangci-lint", []string{"run", "./..."}); err != nil {
-		fmt.Println(err)
+	if ensureInstalled("gofumpt") {
+		fmt.Println("Running gofumpt...")
+		_ = run("gofumpt", "-l", "-w", ".")
+	} else {
+		fmt.Println("gofumpt not installed (skip)")
 	}
 
-	if err := runCommand("go", []string{"install", "honnef.co/go/tools/cmd/staticcheck@latest"}); err != nil {
-		fmt.Println(err)
-	}
-
-	if err := runCommand("staticcheck", []string{"./..."}); err != nil {
-		fmt.Println(err)
-	}
-
-	if err := runCommand("go", []string{"install", "mvdan.cc/gofumpt@latest"}); err != nil {
-		fmt.Println(err)
-	}
-
-	if err := runCommand("gofumpt", []string{"-l", "-w", "."}); err != nil {
-		fmt.Println(err)
-	}
-
-	fmt.Println("All checks completed!")
+	fmt.Println("Done ✔")
 }

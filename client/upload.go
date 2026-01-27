@@ -13,13 +13,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -47,13 +47,20 @@ type UploadResponse struct {
 }
 
 type uploadBodyFactory struct {
-	ctx       context.Context
-	params    UploadParams
-	cleanPath string
+	ctx      context.Context
+	params   UploadParams
+	readPath string
+}
+
+type uploadDataSpec struct {
+	useFile      bool
+	dataWasBytes bool
+	dataString   string
+	dataBytes    []byte
 }
 
 func (f uploadBodyFactory) NewBody() (io.ReadCloser, error) {
-	return newUploadBody(f.ctx, f.params, f.cleanPath)
+	return newUploadBody(f.ctx, f.params, f.readPath)
 }
 
 // It must satisfy io.Reader to match doWithRetry signature,
@@ -64,6 +71,9 @@ func (f uploadBodyFactory) Read(p []byte) (int, error) {
 
 // NewUploader creates a new Uploader bound to c.
 func NewUploader(c *Client) *Uploader {
+	if c == nil {
+		panic("lokex/client: nil Client passed to NewUploader")
+	}
 	return &Uploader{
 		client: c,
 	}
@@ -71,7 +81,7 @@ func NewUploader(c *Client) *Uploader {
 
 // Upload uploads a file to Lokalise using /files/upload.
 // Behavior:
-//  1. Validates and cleans the "filename" param, ensures it's a regular file.
+//  1. Validates and cleans the "filename" param, ensures it's a regular file (unless data is provided explicitly).
 //  2. If "data" is absent, reads the file and base64-encodes it (StdEncoding).
 //     If "data" is present as []byte, it is base64-encoded; if string, it is
 //     used as-is (assumed base64).
@@ -81,24 +91,37 @@ func NewUploader(c *Client) *Uploader {
 // If poll is true, it will call PollProcesses on that process and only return
 // when the process reaches "finished" (otherwise it errors). If poll is false,
 // it returns immediately after kickoff with the process id.
-func (u *Uploader) Upload(ctx context.Context, params UploadParams, poll bool) (string, error) {
-	body, cleanPath, err := cloneAndValidateParams(params)
+func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath string, poll bool) (string, error) {
+	if u == nil || u.client == nil {
+		return "", errors.New("upload: uploader/client is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	body, filename, err := cloneAndValidateParams(params) // filename — как в API
 	if err != nil {
 		return "", err
 	}
 
+	readPath := ""
 	if _, hasData := body["data"]; !hasData {
-		if err := ensureFileIsRegular(cleanPath); err != nil {
+		readPath = strings.TrimSpace(srcPath)
+		if readPath == "" {
+			readPath = filename
+		}
+		readPath = filepath.Clean(readPath)
+
+		if err := ensureFileIsRegular(readPath); err != nil {
 			return "", err
 		}
 	}
 
-	// Stream JSON + base64 instead of materializing it.
-	// This works whether:
-	// - params["data"] missing -> reads file and base64-encodes on the fly
-	// - params["data"] is []byte -> base64-encodes on the fly
-	// - params["data"] is string -> writes as-is (assumed already base64)
-	processID, err := u.kickoffUploadStreaming(ctx, body, cleanPath)
+	processID, err := u.kickoffUploadStreaming(ctx, body, readPath)
 	if err != nil {
 		return "", err
 	}
@@ -109,212 +132,339 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams, poll bool) (
 	return u.pollUntilFinished(ctx, processID)
 }
 
-func (u *Uploader) kickoffUploadStreaming(ctx context.Context, body map[string]any, cleanPath string) (string, error) {
+func (u *Uploader) kickoffUploadStreaming(ctx context.Context, body UploadParams, cleanPath string) (string, error) {
+	if u == nil || u.client == nil {
+		return "", errors.New("upload: kickoff: uploader/client is nil")
+	}
+
+	cleanPath = strings.TrimSpace(cleanPath)
+	if cleanPath == "" {
+		if _, has := body["data"]; !has {
+			return "", errors.New("upload: kickoff: missing local file path and 'data'")
+		}
+	}
+
 	var resp UploadResponse
 	path := u.client.projectPath("files/upload")
 
 	factory := uploadBodyFactory{
-		ctx:       ctx,
-		params:    body,
-		cleanPath: cleanPath,
+		ctx:      ctx,
+		params:   body,
+		readPath: cleanPath,
 	}
 
 	if err := u.client.doWithRetry(ctx, http.MethodPost, path, factory, &resp); err != nil {
-		return "", fmt.Errorf("upload: %w", err)
+		return "", fmt.Errorf("upload: kickoff: %w", err)
 	}
 
 	processID := strings.TrimSpace(resp.Process.ProcessID)
 	if processID == "" {
-		return "", fmt.Errorf("upload: empty process id in response")
+		return "", fmt.Errorf("upload: kickoff: empty process id in response")
 	}
 	return processID, nil
 }
 
 func newUploadBody(ctx context.Context, params UploadParams, cleanPath string) (io.ReadCloser, error) {
-	pr, pw := io.Pipe()
-
-	var (
-		dataString   string
-		dataBytes    []byte
-		dataWasBytes bool
-		useFile      bool
-	)
-
-	if v, ok := params["data"]; ok {
-		switch t := v.(type) {
-		case string:
-			dataString = t
-		case []byte:
-			dataWasBytes = true
-			dataBytes = t
-		default:
-			return nil, fmt.Errorf("upload: 'data' must be string or []byte, got %T", v)
-		}
-	} else {
-		useFile = true
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
+	spec, err := parseUploadDataSpec(params)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	pr, pw := io.Pipe()
 	go func() {
-		var err error
+		var werr error
 		defer func() {
-			if err != nil {
-				_ = pw.CloseWithError(err)
+			if werr != nil {
+				_ = pw.CloseWithError(werr)
 			} else {
 				_ = pw.Close()
 			}
 		}()
 
-		// Proper ctx-cancel watcher that stops once we’re done
-		finished := make(chan struct{})
-		defer close(finished)
-		go func() {
-			select {
-			case <-ctx.Done():
-				_ = pw.CloseWithError(ctx.Err())
-			case <-finished:
-			}
-		}()
+		// Close the pipe if ctx is canceled.
+		stop := context.AfterFunc(ctx, func() {
+			_ = pw.CloseWithError(ctx.Err())
+		})
+		defer stop()
 
-		w := bufio.NewWriterSize(pw, 256<<10)
+		// If already canceled, bail early (avoids noisy pipe errors).
+		if err := ctx.Err(); err != nil {
+			werr = err
+			return
+		}
+
+		bw := bufio.NewWriterSize(pw, 256<<10)
 		defer func() {
-			if ferr := w.Flush(); err == nil && ferr != nil {
-				err = ferr
+			if ferr := bw.Flush(); werr == nil && ferr != nil {
+				werr = ferr
 			}
 		}()
 
-		keys := make([]string, 0, len(params)+1)
-		for k := range params {
-			if k == "data" {
-				continue
-			}
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-
-		if _, err = w.WriteString("{"); err != nil {
-			return
-		}
-
-		first := true
-		writeKV := func(k string, v any) {
-			if err != nil {
-				return
-			}
-			if !first {
-				_, err = w.WriteString(",")
-				if err != nil {
-					return
-				}
-			}
-			first = false
-
-			kb, e := json.Marshal(k)
-			if e != nil {
-				err = e
-				return
-			}
-			vb, e := json.Marshal(v)
-			if e != nil {
-				err = e
-				return
-			}
-			if _, err = w.Write(kb); err != nil {
-				return
-			}
-			if _, err = w.WriteString(":"); err != nil {
-				return
-			}
-			_, err = w.Write(vb)
-		}
-
-		for _, k := range keys {
-			writeKV(k, params[k])
-		}
-
-		if !first {
-			if _, err = w.WriteString(","); err != nil {
-				return
-			}
-		}
-
-		if _, err = w.WriteString(`"data":"`); err != nil {
-			return
-		}
-
-		// If caller provided base64 string, write as-is.
-		if !useFile && !dataWasBytes {
-			if _, err = w.WriteString(dataString); err != nil {
-				return
-			}
-			_, err = w.WriteString(`"}`)
-			return
-		}
-
-		enc := base64.NewEncoder(base64.StdEncoding, w)
-
-		switch {
-		case useFile:
-			f, e := os.Open(cleanPath)
-			if e != nil {
-				err = e
-				_ = enc.Close()
-				return
-			}
-			_, err = io.Copy(enc, f) // let io.Copy manage buffer
-			_ = f.Close()
-
-		case dataWasBytes:
-			_, err = io.Copy(enc, bytes.NewReader(dataBytes))
-		}
-
-		if cerr := enc.Close(); err == nil && cerr != nil {
-			err = cerr
-			return
-		}
-
-		if _, err = w.WriteString(`"}`); err != nil {
-			return
-		}
+		werr = writeUploadJSON(bw, params, cleanPath, spec)
 	}()
 
 	return pr, nil
 }
 
+func parseUploadDataSpec(params UploadParams) (uploadDataSpec, error) {
+	var spec uploadDataSpec
+
+	v, ok := params["data"]
+	if !ok {
+		spec.useFile = true
+		return spec, nil
+	}
+
+	switch t := v.(type) {
+	case string:
+		// fail fast BEFORE we create the pipe / start goroutines / send HTTP.
+		if err := validateStdBase64String(t); err != nil {
+			return uploadDataSpec{}, err
+		}
+		spec.dataString = t
+	case []byte:
+		spec.dataWasBytes = true
+		spec.dataBytes = t
+	default:
+		return uploadDataSpec{}, fmt.Errorf("upload: 'data' must be string or []byte, got %T", v)
+	}
+
+	return spec, nil
+}
+
+func writeUploadJSON(w *bufio.Writer, params UploadParams, cleanPath string, spec uploadDataSpec) error {
+	// Start JSON object.
+	if _, err := w.WriteString("{"); err != nil {
+		return err
+	}
+
+	first := true
+	writeComma := func() error {
+		if first {
+			first = false
+			return nil
+		}
+		_, err := w.WriteString(",")
+		return err
+	}
+
+	// Write params except "data" (unordered).
+	for k, v := range params {
+		if k == "data" {
+			continue
+		}
+		if err := writeUploadKV(w, k, v, &first); err != nil {
+			return err
+		}
+	}
+
+	// Now write "data".
+	if err := writeComma(); err != nil {
+		return err
+	}
+
+	if _, err := w.WriteString(`"data":"`); err != nil {
+		return err
+	}
+
+	if err := writeUploadData(w, cleanPath, spec); err != nil {
+		return err
+	}
+
+	// Close string + object.
+	_, err := w.WriteString(`"}`)
+	return err
+}
+
+func writeUploadKV(w *bufio.Writer, k string, v any, first *bool) error {
+	if !*first {
+		if _, err := w.WriteString(","); err != nil {
+			return err
+		}
+	} else {
+		*first = false
+	}
+
+	kb, err := json.Marshal(k)
+	if err != nil {
+		return err
+	}
+	vb, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	if _, err := w.Write(kb); err != nil {
+		return err
+	}
+	if _, err := w.WriteString(":"); err != nil {
+		return err
+	}
+	_, err = w.Write(vb)
+	return err
+}
+
+func writeUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) error {
+	// Caller provided base64 string -> just write as-is.
+	if !spec.useFile && !spec.dataWasBytes {
+		_, err := w.WriteString(spec.dataString)
+		return err
+	}
+
+	// Pick a reader source (file or bytes).
+	var (
+		r         io.Reader
+		closeFile func() error
+	)
+
+	switch {
+	case spec.useFile:
+		f, err := os.Open(cleanPath)
+		if err != nil {
+			return err
+		}
+		r = f
+		closeFile = f.Close
+
+	case spec.dataWasBytes:
+		r = bytes.NewReader(spec.dataBytes)
+
+	default:
+		return fmt.Errorf("upload: invalid data spec")
+	}
+
+	enc := base64.NewEncoder(base64.StdEncoding, w)
+
+	_, err := io.Copy(enc, r)
+
+	// Close file (if any), but don’t clobber existing error.
+	if closeFile != nil {
+		if cerr := closeFile(); cerr != nil {
+			if err == nil {
+				err = cerr
+			} else {
+				err = errors.Join(err, cerr)
+			}
+		}
+	}
+
+	// Close encoder (flushes final base64 padding).
+	if cerr := enc.Close(); cerr != nil {
+		if err == nil {
+			err = cerr
+		} else {
+			err = errors.Join(err, cerr)
+		}
+	}
+
+	return err
+}
+
+// validateStdBase64String ensures s can be safely embedded into a JSON string
+// without escaping (i.e., it contains only StdEncoding base64 chars).
+func validateStdBase64String(s string) error {
+	if s == "" {
+		return fmt.Errorf("upload: 'data' cannot be empty")
+	}
+	if len(s)%4 != 0 {
+		return fmt.Errorf("upload: 'data' base64 length must be multiple of 4")
+	}
+
+	// '=' only allowed at the end, max 2.
+	pad := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'A' <= c && c <= 'Z',
+			'a' <= c && c <= 'z',
+			'0' <= c && c <= '9',
+			c == '+', c == '/':
+			if pad != 0 {
+				return fmt.Errorf("upload: invalid base64 padding position")
+			}
+		case c == '=':
+			pad++
+			if pad > 2 {
+				return fmt.Errorf("upload: invalid base64 padding")
+			}
+		default:
+			return fmt.Errorf("upload: 'data' contains non-base64 char %q", c)
+		}
+	}
+
+	// If padding exists, it must occupy only the last pad chars.
+	if pad > 0 {
+		for i := len(s) - pad; i < len(s); i++ {
+			if s[i] != '=' {
+				return fmt.Errorf("upload: invalid base64 padding")
+			}
+		}
+	}
+
+	return nil
+}
+
 // cloneAndValidateParams copies user params and extracts a clean file path.
-func cloneAndValidateParams(params UploadParams) (map[string]any, string, error) {
-	// copy to avoid mutating caller's map
-	body := make(map[string]any, len(params)+1)
+func cloneAndValidateParams(params UploadParams) (UploadParams, string, error) {
+	body := make(UploadParams, len(params)+1)
 	maps.Copy(body, params)
 
 	raw, ok := body["filename"]
 	if !ok {
 		return nil, "", fmt.Errorf("upload: missing 'filename' param")
 	}
+
 	name, ok := raw.(string)
-	if !ok || strings.TrimSpace(name) == "" {
+	if !ok {
 		return nil, "", fmt.Errorf("upload: 'filename' must be a non-empty string")
 	}
-	cleanPath := filepath.Clean(name)
-	return body, cleanPath, nil
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, "", fmt.Errorf("upload: 'filename' must be a non-empty string")
+	}
+
+	body["filename"] = name
+
+	return body, name, nil
 }
 
 // ensureFileIsRegular stats the path and rejects directories / missing files.
-func ensureFileIsRegular(cleanPath string) error {
-	fi, err := os.Stat(cleanPath)
+func ensureFileIsRegular(readPath string) error {
+	if strings.TrimSpace(readPath) == "" {
+		return errors.New("upload: empty file path")
+	}
+
+	fi, err := os.Stat(readPath)
 	if err != nil {
-		return fmt.Errorf("upload: stat %q: %w", cleanPath, err)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("upload: file not found: %q: %w", readPath, err)
+		}
+		return fmt.Errorf("upload: stat %q: %w", readPath, err)
 	}
 	if fi.IsDir() {
-		return fmt.Errorf("upload: %q is a directory, need a file", cleanPath)
+		return fmt.Errorf("upload: %q is a directory, need a file", readPath)
 	}
 	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("upload: %q is not a regular file", cleanPath)
+		return fmt.Errorf("upload: %q is not a regular file", readPath)
 	}
 	return nil
 }
 
 // pollUntilFinished polls a single process until it’s "finished", otherwise errors.
 func (u *Uploader) pollUntilFinished(ctx context.Context, processID string) (string, error) {
+	processID = strings.TrimSpace(processID)
+	if processID == "" {
+		return "", errors.New("upload: empty process_id")
+	}
+
 	results, err := u.client.PollProcesses(ctx, []string{processID})
 	if err != nil {
 		return "", fmt.Errorf("upload: poll processes: %w", err)
@@ -322,9 +472,14 @@ func (u *Uploader) pollUntilFinished(ctx context.Context, processID string) (str
 	if len(results) == 0 {
 		return "", fmt.Errorf("upload: no process results returned (process_id=%s)", processID)
 	}
-	completed := results[0]
-	if completed.Status == "finished" {
+
+	p := results[0]
+	switch p.Status {
+	case StatusFinished:
 		return processID, nil
+	case StatusFailed:
+		return "", fmt.Errorf("upload: process %s failed", processID)
+	default:
+		return "", fmt.Errorf("upload: process %s did not finish (status=%s)", processID, p.Status)
 	}
-	return "", fmt.Errorf("upload: process %s did not finish (status=%s)", completed.ProcessID, completed.Status)
 }

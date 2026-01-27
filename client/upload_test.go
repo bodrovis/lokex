@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -90,7 +91,7 @@ func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	pid, err := u.Upload(ctx, params, true)
+	pid, err := u.Upload(ctx, params, "", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestUploader_Upload_NoPoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	pid, err := u.Upload(ctx, params, false)
+	pid, err := u.Upload(ctx, params, "", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 		"data":     "dGVzdA==", // "test"
 	}
 
-	if _, err := u.Upload(context.Background(), params, true); err != nil {
+	if _, err := u.Upload(context.Background(), params, "", true); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 }
@@ -234,7 +235,7 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 		"data":     []byte("XYZ"),
 	}
 
-	if _, err := u.Upload(context.Background(), params, true); err != nil {
+	if _, err := u.Upload(context.Background(), params, "", true); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 }
@@ -245,7 +246,7 @@ func TestUploader_Upload_MissingFilename(t *testing.T) {
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"lang_iso": "en",
-	}, true)
+	}, "", true)
 	if err == nil || !strings.Contains(err.Error(), "missing 'filename'") {
 		t.Fatalf("want missing filename error, got %v", err)
 	}
@@ -259,7 +260,7 @@ func TestUploader_Upload_DirectoryIsError(t *testing.T) {
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": dir,
 		"lang_iso": "en",
-	}, true)
+	}, "", true)
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("want directory error, got %v", err)
 	}
@@ -294,7 +295,7 @@ func TestUploader_Upload_TimeoutWhilePolling(t *testing.T) {
 	_, err := u.Upload(ctx, client.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
-	}, true)
+	}, "", true)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want context deadline, got %v", err)
 	}
@@ -324,7 +325,7 @@ func TestUploader_Upload_SetsAcceptHeader_AndContentType(t *testing.T) {
 
 	if _, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, false); err != nil {
+	}, "", false); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 }
@@ -339,7 +340,7 @@ func TestUploader_Upload_RejectsWeirdDataType(t *testing.T) {
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en", "data": 12345, // not string/[]byte
-	}, false)
+	}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "'data' must be string or []byte") {
 		t.Fatalf("want type error, got %v", err)
 	}
@@ -353,9 +354,9 @@ func TestUploader_Upload_ReadFileError(t *testing.T) {
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": filepath.Join(t.TempDir(), "nope.json"),
 		"lang_iso": "en",
-	}, false)
-	if err == nil || !strings.Contains(err.Error(), "stat") {
-		t.Fatalf("want stat/read error, got %v", err)
+	}, "", false)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("want not-exist error, got %v", err)
 	}
 }
 
@@ -375,7 +376,7 @@ func TestUploader_Upload_EmptyProcessIDIsError(t *testing.T) {
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, false)
+	}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "empty process id") {
 		t.Fatalf("want empty process id error, got %v", err)
 	}
@@ -398,7 +399,7 @@ func TestUploader_Upload_Allows204EmptyBody_ButErrorsOnMissingProcess(t *testing
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, false)
+	}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "empty process id") {
 		t.Fatalf("want empty process id error, got %v", err)
 	}
@@ -432,7 +433,7 @@ func TestUploader_Upload_RetriesOn5xxThenSucceeds(t *testing.T) {
 
 	if _, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, true); err != nil {
+	}, "", true); err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
 
@@ -458,7 +459,7 @@ func TestUploader_Upload_DoesNotRetryOn4xx(t *testing.T) {
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, false)
+	}, "", false)
 	if err == nil {
 		t.Fatal("want error, got nil")
 	}
@@ -485,7 +486,7 @@ func TestUploader_Upload_DecodeErrorBubbles(t *testing.T) {
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, false)
+	}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("want decode response error, got %v", err)
 	}
@@ -517,14 +518,110 @@ func TestIntegration_Upload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// filename -> what Lokalise sees; srcPath -> where we read bytes from.
 	pid, err := u.Upload(ctx, client.UploadParams{
-		"filename": fp,
+		"filename": "locales/%LANG_ISO%.json", // demo filename
 		"lang_iso": "en",
-	}, true)
+	}, fp, true)
 	if err != nil {
 		t.Fatalf("integration upload failed: %v", err)
 	}
 	if pid == "" {
 		t.Fatalf("expected non-empty process id")
+	}
+}
+
+func TestNewUploader_NilClientPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatalf("expected panic, got nil")
+		}
+	}()
+	_ = client.NewUploader(nil)
+}
+
+func TestUploader_Upload_RejectsInvalidBase64String_NoNetwork(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	_, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp,
+		"lang_iso": "en",
+		"data":     "nope!!!",
+	}, "", false)
+
+	if err == nil || !strings.Contains(err.Error(), "base64") {
+		t.Fatalf("want base64 validation error, got %v", err)
+	}
+
+	urlPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	if got := httpmock.GetCallCountInfo()["POST "+urlPost]; got != 0 {
+		t.Fatalf("POST attempts = %d, want 0", got)
+	}
+}
+
+func TestUploader_Upload_ContextAlreadyCanceled(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := u.Upload(ctx, client.UploadParams{
+		"filename": fp,
+		"lang_iso": "en",
+	}, "", false)
+
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context canceled, got %v", err)
+	}
+}
+
+func TestUploader_Upload_ContextCancelDuringBodyBuild(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	urlPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	httpmock.RegisterResponder("POST", urlPost, func(req *http.Request) (*http.Response, error) {
+		time.Sleep(10 * time.Millisecond)
+
+		_, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"u"}}`), nil
+	})
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "f.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	huge := make([]byte, 50<<20)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
+	defer cancel()
+
+	_, err := u.Upload(ctx, client.UploadParams{
+		"filename": fp,
+		"lang_iso": "en",
+		"data":     huge,
+	}, "", false)
+
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want ctx deadline exceeded, got %v", err)
 	}
 }
