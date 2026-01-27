@@ -23,9 +23,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bodrovis/lokex/internal/apierr"
-	"github.com/bodrovis/lokex/internal/utils"
-	"github.com/bodrovis/lokex/internal/zipx"
+	"github.com/bodrovis/lokex/v2/internal/apierr"
+	"github.com/bodrovis/lokex/v2/internal/utils"
+	"github.com/bodrovis/lokex/v2/internal/zipx"
 )
 
 // Downloader wraps a *Client to perform Lokalise file exports (downloads).

@@ -8,7 +8,7 @@
 ## Installation
 
 ```bash
-go get github.com/bodrovis/lokex
+go get github.com/bodrovis/lokex/v2
 ```
 
 ## Usage
@@ -20,7 +20,7 @@ import (
     "log"
     "time"
 
-    "github.com/bodrovis/lokex/client"
+    "github.com/bodrovis/lokex/v2/client"
 )
 
 cli, err := client.NewClient("YOUR_API_TOKEN", "LOKALISE_PROJECT_ID", client.WithBackoff(

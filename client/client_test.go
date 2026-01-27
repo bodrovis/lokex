@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bodrovis/lokex/client"
+	"github.com/bodrovis/lokex/v2/client"
 )
 
 func TestNewClient_DefaultBaseURL(t *testing.T) {

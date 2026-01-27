@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bodrovis/lokex/client"
-	"github.com/bodrovis/lokex/internal/apierr"
-	"github.com/bodrovis/lokex/internal/utils"
+	"github.com/bodrovis/lokex/v2/client"
+	"github.com/bodrovis/lokex/v2/internal/apierr"
+	"github.com/bodrovis/lokex/v2/internal/utils"
 	"github.com/jarcoal/httpmock"
 )
 

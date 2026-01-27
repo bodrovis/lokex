@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bodrovis/lokex/client"
+	"github.com/bodrovis/lokex/v2/client"
 	"github.com/jarcoal/httpmock"
 )
 
