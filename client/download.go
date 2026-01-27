@@ -14,12 +14,13 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"net/http"
 	"os"
-	"strconv"
+	"path/filepath"
 	"strings"
 
 	"github.com/bodrovis/lokex/internal/apierr"
@@ -57,6 +58,9 @@ type FetchFunc func(ctx context.Context, body io.Reader) (string, error)
 // NewDownloader creates a new Downloader bound to c.
 // c must be non-nil; it is used for HTTP, retry/backoff, and polling.
 func NewDownloader(c *Client) *Downloader {
+	if c == nil {
+		panic("lokex/client: nil Client passed to NewDownloader")
+	}
 	return &Downloader{
 		client: c,
 	}
@@ -70,6 +74,9 @@ func NewDownloader(c *Client) *Downloader {
 //
 // Returns the bundle_url on success.
 func (d *Downloader) Download(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
+	if d == nil || d.client == nil {
+		return "", errors.New("download: downloader/client is nil")
+	}
 	return d.doDownload(ctx, unzipTo, params, d.FetchBundle)
 }
 
@@ -82,6 +89,9 @@ func (d *Downloader) Download(ctx context.Context, unzipTo string, params Downlo
 //
 // Returns the final download_url on success.
 func (d *Downloader) DownloadAsync(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
+	if d == nil || d.client == nil {
+		return "", errors.New("download: downloader/client is nil")
+	}
 	return d.doDownload(ctx, unzipTo, params, d.FetchBundleAsync)
 }
 
@@ -95,16 +105,34 @@ func (d *Downloader) doDownload(
 	params DownloadParams,
 	fetch FetchFunc,
 ) (string, error) {
-	// copy to avoid mutating caller's map
-	body := make(map[string]any, len(params))
-	maps.Copy(body, params)
+	if d == nil || d.client == nil {
+		return "", errors.New("download: downloader/client is nil")
+	}
+	if fetch == nil {
+		return "", errors.New("download: fetch func is nil")
+	}
+	if strings.TrimSpace(unzipTo) == "" {
+		return "", errors.New("download: unzipTo is empty")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	buf, err := utils.EncodeJSONBody(body)
+	// copy to avoid mutating caller's map
+	var body map[string]any
+	if len(params) > 0 {
+		body = make(map[string]any, len(params))
+		maps.Copy(body, params)
+	} else {
+		body = map[string]any{}
+	}
+
+	rdr, err := utils.EncodeJSONBody(body)
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
 
-	bundleURL, err := fetch(ctx, buf)
+	bundleURL, err := fetch(ctx, rdr)
 	if err != nil {
 		return "", err
 	}
@@ -116,85 +144,139 @@ func (d *Downloader) doDownload(
 	return bundleURL, nil
 }
 
-// FetchBundleAsync kicks off an async export and polls until it yields a
-// download URL. On success it returns the final download_url.
+// FetchBundleAsync kicks off an async export (POST /files/async-download) and polls
+// until the process yields a terminal status. On success it returns download_url.
 func (d *Downloader) FetchBundleAsync(ctx context.Context, body io.Reader) (string, error) {
-	var resp AsyncDownloadResponse
+	if d == nil || d.client == nil {
+		return "", fmt.Errorf("fetch bundle async: nil downloader/client")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("fetch bundle async: context: %w", err)
+	}
+	if body == nil {
+		return "", fmt.Errorf("fetch bundle async: nil request body")
+	}
+
+	// 1) Kick off async export -> get process_id.
+	var kickoff AsyncDownloadResponse
 	path := d.client.projectPath("files/async-download")
 
-	if err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &resp); err != nil {
+	if err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &kickoff); err != nil {
 		return "", fmt.Errorf("fetch bundle async: %w", err)
 	}
-	if resp.ProcessID == "" {
+
+	pid := strings.TrimSpace(kickoff.ProcessID)
+	if pid == "" {
 		return "", fmt.Errorf("fetch bundle async: empty process id")
 	}
 
-	// Poll this single process until it finishes or times out.
-	results, err := d.client.PollProcesses(ctx, []string{resp.ProcessID})
+	// 2) Poll this single process until terminal or ctx/poll budget expires.
+	results, err := d.client.PollProcesses(ctx, []string{pid})
 	if err != nil {
 		return "", fmt.Errorf("fetch bundle async: poll processes: %w", err)
 	}
 	if len(results) == 0 {
-		return "", fmt.Errorf("fetch bundle async: no process results returned")
+		return "", fmt.Errorf("fetch bundle async: no process results returned (process_id=%s)", pid)
 	}
 
-	completed := results[0]
-	if completed.Status == "finished" && completed.DownloadURL != "" {
-		return completed.DownloadURL, nil
-	}
+	p := results[0]
 
-	return "", fmt.Errorf(
-		"fetch bundle async: process %s did not finish (status=%s)",
-		completed.ProcessID,
-		completed.Status,
-	)
+	// 3) Interpret result.
+	switch p.Status {
+	case StatusFinished:
+		u := strings.TrimSpace(p.DownloadURL)
+		if u == "" {
+			return "", fmt.Errorf("fetch bundle async: process %s finished but download_url is empty", p.ProcessID)
+		}
+		return u, nil
+
+	case StatusFailed:
+		return "", fmt.Errorf("fetch bundle async: process %s failed", p.ProcessID)
+
+	default:
+		// Usually means we ran out of polling budget (PollMaxWait) but ctx might still be alive,
+		// or Lokalise is slow and never reached terminal before our poll deadline.
+		return "", fmt.Errorf("fetch bundle async: process %s did not finish (status=%s)", p.ProcessID, p.Status)
+	}
 }
 
-// FetchBundle performs a synchronous export and returns the bundle_url.
+// FetchBundle performs a synchronous export (POST /files/download) and returns bundle_url.
 func (d *Downloader) FetchBundle(ctx context.Context, body io.Reader) (string, error) {
+	if d == nil || d.client == nil {
+		return "", fmt.Errorf("fetch bundle: nil downloader/client")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("fetch bundle: context: %w", err)
+	}
+	if body == nil {
+		return "", fmt.Errorf("fetch bundle: nil request body")
+	}
+
 	var bundle DownloadBundle
 	path := d.client.projectPath("files/download")
 
 	if err := d.client.doWithRetry(ctx, http.MethodPost, path, body, &bundle); err != nil {
 		return "", fmt.Errorf("fetch bundle: %w", err)
 	}
-	if bundle.BundleURL == "" {
+
+	url := strings.TrimSpace(bundle.BundleURL)
+	if url == "" {
 		return "", fmt.Errorf("fetch bundle: empty bundle url")
 	}
-	return bundle.BundleURL, nil
+	return url, nil
 }
 
 // DownloadAndUnzip downloads the zip from bundleURL with retry/backoff,
 // validates that it's a well-formed zip, and unzips it into destDir with a
 // series of safety checks (zip-slip, entry count, size caps, no symlinks/devs).
 func (d *Downloader) DownloadAndUnzip(ctx context.Context, bundleURL, destDir string) error {
-	if strings.TrimSpace(bundleURL) == "" {
+	if d == nil || d.client == nil || d.client.HTTPClient == nil {
+		return fmt.Errorf("download: nil client")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	bundleURL = strings.TrimSpace(bundleURL)
+	if bundleURL == "" {
 		return fmt.Errorf("download: empty bundle url")
 	}
+	destDir = strings.TrimSpace(destDir)
+	if destDir == "" {
+		return fmt.Errorf("download: empty dest dir")
+	}
+
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("download: create dest: %w", err)
 	}
 
-	// temp ZIP (system temp dir)
-	tmpZip, err := os.CreateTemp("", "lokex-*.zip")
+	// Temp dir per download attempt group. Easy cleanup, no broken files left behind.
+	tmpDir, err := os.MkdirTemp("", "lokex-zip-*")
 	if err != nil {
-		return fmt.Errorf("download: create temp zip: %w", err)
+		return fmt.Errorf("download: create temp dir: %w", err)
 	}
-	tmpPath := tmpZip.Name()
-	_ = tmpZip.Close() // we'll reopen inside downloadOnce()
-	defer func() { _ = os.Remove(tmpPath) }()
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	ua := ""
-	if d.client != nil {
-		ua = d.client.UserAgent
-	}
+	tmpPath := filepath.Join(tmpDir, "bundle.zip")
+
+	ua := d.client.UserAgent
 
 	// Retry the HTTP fetch + quick zip validation until success or policy expires.
 	if err := d.client.withExpBackoff(ctx, "download", func(_ int) error {
 		if err := d.downloadOnce(ctx, bundleURL, tmpPath, ua); err != nil {
 			return err
 		}
-		return zipx.Validate(tmpPath)
+		if err := zipx.Validate(tmpPath); err != nil {
+			// keep wrapping — errors.Is(... io.ErrUnexpectedEOF) still works through wrapping
+			return fmt.Errorf("validate zip: %w", err)
+		}
+		return nil
 	}, nil); err != nil {
 		return err
 	}
@@ -206,16 +288,60 @@ func (d *Downloader) DownloadAndUnzip(ctx context.Context, bundleURL, destDir st
 }
 
 // downloadOnce performs a single GET of the bundle and writes it to destPath.
-// It sets Accept headers appropriate for zips and optionally propagates a
-// User-Agent. It checks Content-Length (when present) to detect truncation.
-func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string) error {
-	if d == nil || d.client == nil || d.client.HTTPClient == nil {
-		return fmt.Errorf("download: nil http client")
+// It writes into a temp file first and renames it on success, so partial downloads
+// never leave broken zips at destPath.
+func (d *Downloader) downloadOnce(ctx context.Context, urlStr, destPath, ua string) error {
+	httpc, urlStr, destPath, err := d.downloadOncePrecheck(ctx, urlStr, destPath)
+	if err != nil {
+		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	resp, err := d.doDownloadRequest(ctx, httpc, urlStr, ua)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	// Non-2xx: read a capped snippet for an APIError and bail.
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return apierr.Parse(slurp, resp.StatusCode)
+	}
+
+	return writeHTTPBodyAtomically(destPath, resp.Body, resp.ContentLength)
+}
+
+// downloadOncePrecheck validates inputs and extracts the http.Client.
+// Keeping this separate makes downloadOnce small and avoids nil-panics.
+func (d *Downloader) downloadOncePrecheck(ctx context.Context, urlStr, destPath string) (*http.Client, string, string, error) {
+	if d == nil || d.client == nil || d.client.HTTPClient == nil {
+		return nil, "", "", fmt.Errorf("download: nil http client")
+	}
+	if ctx == nil {
+		return nil, "", "", fmt.Errorf("download: nil context")
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, "", "", cerr
+	}
+
+	urlStr = strings.TrimSpace(urlStr)
+	destPath = strings.TrimSpace(destPath)
+	if urlStr == "" {
+		return nil, "", "", fmt.Errorf("download: empty url")
+	}
+	if destPath == "" {
+		return nil, "", "", fmt.Errorf("download: empty dest path")
+	}
+
+	return d.client.HTTPClient, urlStr, destPath, nil
+}
+
+// doDownloadRequest builds and executes the GET request with headers tuned for zip bytes.
+func (d *Downloader) doDownloadRequest(ctx context.Context, httpc *http.Client, urlStr, ua string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	if ua != "" {
 		req.Header.Set("User-Agent", ua)
@@ -224,50 +350,50 @@ func (d *Downloader) downloadOnce(ctx context.Context, url, destPath, ua string)
 	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("Accept", "application/zip, application/octet-stream, */*")
 
-	resp, err := d.client.HTTPClient.Do(req)
+	resp, err := httpc.Do(req)
 	if err != nil {
-		return fmt.Errorf("http get: %w", err)
+		return nil, fmt.Errorf("http get: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	return resp, nil
+}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
-		_, _ = io.Copy(io.Discard, resp.Body)
+// writeHTTPBodyAtomically writes src into a temp file next to destPath and renames on success.
+// If wantLen >= 0, it checks for truncation and returns io.ErrUnexpectedEOF on mismatch.
+func writeHTTPBodyAtomically(destPath string, src io.Reader, wantLen int64) (err error) {
+	dir := filepath.Dir(destPath)
+	prefix := filepath.Base(destPath) + ".part-"
 
-		return &apierr.APIError{
-			Status:  resp.StatusCode,
-			Code:    resp.StatusCode,
-			Message: strings.TrimSpace(string(slurp)),
-		}
-	}
-
-	f, err := os.Create(destPath)
+	tmp, err := os.CreateTemp(dir, prefix)
 	if err != nil {
 		return fmt.Errorf("create temp zip: %w", err)
 	}
-	// Close to ensure data is flushed to the OS; Sync() is unnecessary for temp files.
-	defer func() { _ = f.Close() }()
+	tmpName := tmp.Name()
 
-	var want int64 = -1
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if n, perr := strconv.ParseInt(cl, 10, 64); perr == nil && n >= 0 {
-			want = n
+	defer func() {
+		_ = tmp.Close()
+		if err != nil {
+			_ = os.Remove(tmpName)
 		}
-	}
+	}()
 
-	n, err := io.Copy(f, resp.Body)
+	n, err := io.Copy(tmp, src)
 	if err != nil {
 		return fmt.Errorf("write zip: %w", err)
 	}
 
-	// trigger retry if server cut us short (only reliable when Content-Length is set)
-	if want >= 0 && n != want {
-		return fmt.Errorf("incomplete download: got %d of %d: %w", n, want, io.ErrUnexpectedEOF)
+	// Detect truncation only when server told us exact length.
+	if wantLen >= 0 && n != wantLen {
+		return fmt.Errorf("incomplete download: got %d of %d: %w", n, wantLen, io.ErrUnexpectedEOF)
 	}
 
-	// Best-effort close now so errors surface early (optional)
-	if err := f.Close(); err != nil {
+	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close zip: %w", err)
+	}
+
+	// On Windows, rename over existing file is flaky; remove first.
+	_ = os.Remove(destPath)
+	if err := os.Rename(tmpName, destPath); err != nil {
+		return fmt.Errorf("finalize zip: %w", err)
 	}
 
 	return nil

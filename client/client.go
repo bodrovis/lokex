@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bodrovis/lokex/internal/apierr"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -24,7 +25,7 @@ const (
 	defaultBaseURL = "https://api.lokalise.com/api2/"
 
 	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
-	defaultUserAgent = "lokex/1.1.0"
+	defaultUserAgent = "lokex/2.0.0"
 
 	// defaultErrCap caps how many bytes we slurp from a non-2xx response when
 	// constructing an apierr.APIError.
@@ -39,6 +40,11 @@ const (
 	// defaults for the polling helper.
 	defaultPollInitialWait = 1 * time.Second
 	defaultPollMaxWait     = 120 * time.Second
+
+	// Queued process statuses
+	StatusQueued   = "queued"
+	StatusFinished = "finished"
+	StatusFailed   = "failed"
 )
 
 // Client is a minimal Lokalise API client.
@@ -76,6 +82,17 @@ type processResponse struct {
 			DownloadURL string `json:"download_url"`
 		} `json:"details"`
 	} `json:"process"`
+}
+
+type pollResult struct {
+	id   string
+	proc QueuedProcess
+	err  error
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
 }
 
 // ToQueuedProcess converts a typed API response into a flattened QueuedProcess.
@@ -144,10 +161,14 @@ func WithHTTPClient(hc *http.Client) Option {
 
 // WithHTTPTimeout sets HTTP client timeout. If no HTTP client exists yet,
 // a default one is created first.
+// A zero value disables the timeout.
 func WithHTTPTimeout(d time.Duration) Option {
 	return func(c *Client) error {
+		if d < 0 {
+			return errors.New("http timeout cannot be negative")
+		}
 		if c.HTTPClient == nil {
-			c.HTTPClient = &http.Client{}
+			c.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
 		}
 		c.HTTPClient.Timeout = d
 		return nil
@@ -158,6 +179,9 @@ func WithHTTPTimeout(d time.Duration) Option {
 // Use 0 (or negative) to disable retries entirely.
 func WithMaxRetries(n int) Option {
 	return func(c *Client) error {
+		if n < 0 {
+			n = 0
+		}
 		c.MaxRetries = n
 		return nil
 	}
@@ -204,8 +228,7 @@ func WithPollWait(initial, max time.Duration) Option {
 }
 
 // NewClient builds a Client with sensible defaults and applies the provided
-// options in order. Empty values in options are treated as explicit and may
-// override defaults (e.g., MaxRetries=0 disables retries).
+// options in order.
 func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	token = strings.TrimSpace(token)
 	projectID = strings.TrimSpace(projectID)
@@ -239,6 +262,7 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	}
 
 	// final normalization (in case WithBaseURL was not used)
+	c.BaseURL = strings.TrimSpace(c.BaseURL)
 	if !strings.HasSuffix(c.BaseURL, "/") {
 		c.BaseURL += "/"
 	}
@@ -246,66 +270,43 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// PollProcesses polls one or more process IDs until they reach a terminal
-// status or the overall poll budget (PollMaxWait) is exhausted.
-// It returns a result for each non-empty input ID, preserving the caller’s order.
-// Terminal statuses: "finished" and "failed".
+// PollProcesses polls one or more Lokalise async process IDs until each reaches a
+// terminal status ("finished" or "failed"), or until the overall polling budget
+// (PollMaxWait) is exhausted.
 //
-// Each polling round fetches statuses with bounded concurrency.
-// Errors from individual GET requests are ignored for that round and retried on
-// subsequent rounds. Context cancellation aborts the whole poll.
+// Ordering rules:
+//   - Returns one result per NON-empty input ID
+//   - Preserves the caller’s order
+//   - Preserves duplicates (same ID can appear multiple times in the output)
+//
+// Error handling rules:
+//   - Transient request errors do NOT abort polling; that ID stays pending and
+//     will be retried in the next round.
+//   - Non-retryable errors for an ID mark ONLY that process as "failed" and
+//     remove it from pending; polling continues for other IDs.
+//   - Context cancellation / deadline aborts the whole poll and returns ctx error.
+//
+// Implementation notes:
+//   - Each polling round does parallel GETs with a fixed concurrency cap.
+//   - We buffer the result channel so workers never block on send.
+//   - We enforce an overall deadline via context.WithDeadline.
 func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
-	start := time.Now()
+	wait, maxWait := c.pollConfig()
+	deadline := time.Now().Add(maxWait)
 
-	wait := c.PollInitialWait
-	if wait <= 0 {
-		wait = defaultPollInitialWait
-	}
+	pollCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 
-	maxWait := c.PollMaxWait
-	if maxWait <= 0 {
-		maxWait = defaultPollMaxWait
-	}
-	if maxWait < wait {
-		maxWait = wait
-	}
+	ordered, processMap, pending := normalizeProcessIDs(processIDs)
 
-	deadline := start.Add(maxWait)
-
-	processMap := make(map[string]QueuedProcess, len(processIDs))
-	pending := make(map[string]struct{}, len(processIDs))
-
-	for _, id := range processIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		processMap[id] = QueuedProcess{ProcessID: id, Status: "queued"}
-		pending[id] = struct{}{}
-	}
-
-	// nothing to do? return in caller-provided order
 	if len(pending) == 0 {
-		results := make([]QueuedProcess, 0, len(processIDs))
-		for _, id := range processIDs {
-			if p, ok := processMap[id]; ok {
-				results = append(results, p)
-			}
-		}
-		return results, nil
+		return buildResults(ordered, processMap), nil
 	}
 
-	// Concurrency cap (tune as you like)
-	const maxConcurrent = 8
-	sem := make(chan struct{}, maxConcurrent)
+	// Bound parallelism so we don't spam Lokalise or overload the client.
+	const maxConcurrent = 6
 
-	type pollResult struct {
-		id   string
-		proc QueuedProcess
-		err  error
-	}
-
-	// Reusable timer (avoid time.After allocations)
+	// Reuse a timer to avoid allocating time.After() on each round.
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		select {
@@ -316,113 +317,206 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 	defer timer.Stop()
 
 	for len(pending) > 0 {
-		// Respect overall poll budget
-		if time.Now().After(deadline) {
-			break
+		if err := pollCtx.Err(); err != nil {
+			return nil, err
 		}
 
-		// Snapshot pending IDs for this round (so we can safely delete from pending later)
-		ids := make([]string, 0, len(pending))
-		for id := range pending {
-			ids = append(ids, id)
+		// One round: fetch all pending statuses concurrently (bounded).
+		procs, errs := c.pollRound(pollCtx, pending, maxConcurrent)
+
+		if err := pollCtx.Err(); err != nil {
+			return nil, err
 		}
 
-		resCh := make(chan pollResult, len(ids))
-
-		// Launch requests with bounded concurrency
-		for _, id := range ids {
-			select {
-			case sem <- struct{}{}:
-				// ok
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-
-			go func(id string) {
-				defer func() { <-sem }()
-
-				path := c.projectPath(fmt.Sprintf("processes/%s", id))
-				var resp processResponse
-				err := c.doRequest(ctx, http.MethodGet, path, nil, &resp, nil)
-				if err != nil {
-					resCh <- pollResult{id: id, err: err}
-					return
-				}
-				resCh <- pollResult{id: id, proc: resp.ToQueuedProcess()}
-			}(id)
-		}
-
-		// Collect results (single goroutine mutates maps → no locks)
-		for i := 0; i < len(ids); i++ {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case r := <-resCh:
-				if r.err != nil {
-					// ignore request-level errors; keep it pending for the next round
-					continue
-				}
-				processMap[r.id] = r.proc
-				if r.proc.Status == "finished" || r.proc.Status == "failed" {
-					delete(pending, r.id)
-				}
-			}
-		}
-		close(resCh)
+		// Apply outcomes to processMap/pending (single goroutine mutates maps => no locks).
+		applyRound(processMap, pending, procs, errs)
 
 		if len(pending) == 0 {
 			break
 		}
 
-		// Sleep with growing interval, clipped to remaining budget
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			break
 		}
 
-		sleep := wait
-		if sleep > remaining {
-			sleep = remaining
-		}
+		sleep := min(wait, remaining)
 		if sleep <= 0 {
 			sleep = 10 * time.Millisecond
 		}
-
-		// Reset timer safely
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(sleep)
-
-		select {
-		case <-timer.C:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		if err := sleepWithTimer(pollCtx, timer, sleep); err != nil {
+			return nil, err
 		}
 
-		// Grow wait for next round (exponential), still bounded
+		// Exponential backoff for next round, clipped to remaining budget.
 		remaining = time.Until(deadline)
-		next := wait * 2
-		if next > remaining {
-			next = remaining
-		}
+		next := min(wait*2, remaining)
 		if next <= 0 {
 			next = 10 * time.Millisecond
 		}
 		wait = next
 	}
 
-	// Preserve input order in results
-	results := make([]QueuedProcess, 0, len(processIDs))
-	for _, id := range processIDs {
-		if p, ok := processMap[id]; ok {
-			results = append(results, p)
+	return buildResults(ordered, processMap), nil
+}
+
+// pollConfig returns initial wait and overall max wait with safe defaults.
+func (c *Client) pollConfig() (wait time.Duration, maxWait time.Duration) {
+	// This might be an overkill as config should already
+	// check these values but let's leave just in case.
+	wait = c.PollInitialWait
+	if wait <= 0 {
+		wait = defaultPollInitialWait
+	}
+
+	maxWait = c.PollMaxWait
+	if maxWait <= 0 {
+		maxWait = defaultPollMaxWait
+	}
+	if maxWait < wait {
+		maxWait = wait
+	}
+	return wait, maxWait
+}
+
+// normalizeProcessIDs trims inputs, preserves caller order (including duplicates),
+// and returns:
+//   - ordered: trimmed IDs in original order (empties kept as "")
+//   - processMap: latest status per UNIQUE non-empty ID (seeded with StatusQueued)
+//   - pending: set of UNIQUE non-empty IDs to poll
+func normalizeProcessIDs(processIDs []string) (ordered []string, processMap map[string]QueuedProcess, pending map[string]struct{}) {
+	ordered = make([]string, 0, len(processIDs))
+	processMap = make(map[string]QueuedProcess, len(processIDs))
+	pending = make(map[string]struct{}, len(processIDs))
+
+	for _, raw := range processIDs {
+		id := strings.TrimSpace(raw)
+		ordered = append(ordered, id)
+		if id == "" {
+			continue
+		}
+		if _, ok := processMap[id]; !ok {
+			processMap[id] = QueuedProcess{ProcessID: id, Status: StatusQueued}
+		}
+		pending[id] = struct{}{}
+	}
+	return
+}
+
+// pollRound performs one polling round for all currently pending IDs.
+// It returns successful process statuses and per-ID errors.
+// Workers never block on send because resCh is buffered to len(pending).
+func (c *Client) pollRound(ctx context.Context, pending map[string]struct{}, maxConcurrent int) ([]QueuedProcess, map[string]error) {
+	ids := make([]string, 0, len(pending))
+	for id := range pending {
+		ids = append(ids, id)
+	}
+
+	resCh := make(chan pollResult, len(ids))
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxConcurrent)
+
+	for _, id := range ids {
+		cur := id
+		g.Go(func() error {
+			path := c.projectPath(fmt.Sprintf("processes/%s", cur))
+			var resp processResponse
+			if err := c.doRequest(gctx, http.MethodGet, path, nil, &resp, nil); err != nil {
+				resCh <- pollResult{id: cur, err: err}
+				return nil
+			}
+			resCh <- pollResult{id: cur, proc: resp.ToQueuedProcess()}
+			return nil
+		})
+	}
+
+	_ = g.Wait()
+	close(resCh)
+
+	procs := make([]QueuedProcess, 0, len(ids))
+	errs := make(map[string]error)
+
+	for r := range resCh {
+		if r.err != nil {
+			errs[r.id] = r.err
+			continue
+		}
+		procs = append(procs, r.proc)
+	}
+
+	return procs, errs
+}
+
+// applyRound updates processMap/pending based on successful statuses and errors.
+func applyRound(
+	processMap map[string]QueuedProcess,
+	pending map[string]struct{},
+	procs []QueuedProcess,
+	errs map[string]error,
+) {
+	// Successful statuses update the latest view and remove terminal IDs.
+	for _, p := range procs {
+		processMap[p.ProcessID] = p
+		if p.Status == StatusFinished || p.Status == StatusFailed {
+			delete(pending, p.ProcessID)
 		}
 	}
-	return results, nil
+
+	// Errors: retryable stays pending; non-retryable fails and is removed.
+	for id, err := range errs {
+		// defensive; PollProcesses should return ctx.Err earlier
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// don't mark failed; caller asked to stop the whole poll
+			continue
+		}
+
+		if apierr.IsRetryable(err) {
+			continue
+		}
+
+		processMap[id] = QueuedProcess{ProcessID: id, Status: StatusFailed}
+		delete(pending, id)
+	}
+}
+
+// buildResults reconstructs output preserving caller order and duplicates.
+// Empty IDs are skipped.
+func buildResults(ordered []string, processMap map[string]QueuedProcess) []QueuedProcess {
+	out := make([]QueuedProcess, 0, len(ordered))
+	for _, id := range ordered {
+		if id == "" {
+			continue
+		}
+		if p, ok := processMap[id]; ok {
+			out = append(out, p)
+		} else {
+			out = append(out, QueuedProcess{ProcessID: id, Status: StatusQueued})
+		}
+	}
+	return out
+}
+
+// sleepWithTimer waits for d or returns early on ctx cancellation.
+// Timer is reused to avoid allocations.
+func sleepWithTimer(ctx context.Context, timer *time.Timer, d time.Duration) error {
+	if d <= 0 {
+		d = 10 * time.Millisecond
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // doWithRetry executes one HTTP operation and retries according to the client's
@@ -434,8 +528,9 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		headers.Set("Content-Type", "application/json")
 	}
 
+	// 1) Preferred: retryBodyFactory (fresh body each attempt)
 	if f, ok := body.(retryBodyFactory); ok {
-		return c.withExpBackoff(ctx, "request", func(_ int) error {
+		return c.withExpBackoff(ctx, "request", func(_ int) (err error) {
 			rc, err := f.NewBody()
 			if err != nil {
 				return fmt.Errorf("create request body: %w", err)
@@ -446,10 +541,12 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 				}
 			}()
 
-			return c.doRequest(ctx, method, path, rc, v, headers)
+			err = c.doRequest(ctx, method, path, rc, v, headers)
+			return err
 		}, nil)
 	}
 
+	// 2) Seekable: rewind per attempt
 	if rs, ok := body.(io.ReadSeeker); ok {
 		return c.withExpBackoff(ctx, "request", func(_ int) error {
 			if _, err := rs.Seek(0, io.SeekStart); err != nil {
@@ -459,11 +556,16 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		}, nil)
 	}
 
+	// 3) Fallback: buffer once (may allocate!)
 	var payload []byte
 	if body != nil {
 		b, err := io.ReadAll(body)
 		if err != nil {
 			return fmt.Errorf("buffer request body: %w", err)
+		}
+		// If caller gave us a ReadCloser-ish thing, close it now that we buffered it.
+		if cbody, ok := body.(io.Closer); ok {
+			_ = cbody.Close()
 		}
 		payload = b
 	}
@@ -477,10 +579,15 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 	}, nil)
 }
 
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.n += int64(n)
+	return n, err
+}
+
 // doRequest performs a single HTTP request (no retries).
-// Body is sent as-is; if it's a bytes.Reader/strings.Reader/bytes.Buffer, we
-// set Content-Length for nicer traces and fewer chunked uploads.
-// If v is nil, the body is drained and discarded; otherwise it is decoded as JSON.
+// Body is sent as-is. If v is nil, the body is drained and discarded;
+// otherwise it is decoded as JSON.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any, headers http.Header) error {
 	fullURL, err := url.JoinPath(c.BaseURL, path)
 	if err != nil {
@@ -491,26 +598,27 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	if body != nil {
-		// Best-effort Content-Length for common reader types
-		if br, ok := body.(*bytes.Reader); ok {
-			req.ContentLength = int64(br.Len())
-		}
-		if sr, ok := body.(*strings.Reader); ok {
-			req.ContentLength = int64(sr.Len())
-		}
-		if bb, ok := body.(*bytes.Buffer); ok {
-			req.ContentLength = int64(bb.Len())
-		}
+
+	// Best-effort Content-Length for common reader types (helps traces; avoids chunked uploads).
+	// We don't try to be too clever here; streaming bodies remain unknown length.
+	switch b := body.(type) {
+	case *bytes.Reader:
+		req.ContentLength = int64(b.Len())
+	case *strings.Reader:
+		req.ContentLength = int64(b.Len())
 	}
 
 	req.Header.Set("X-Api-Token", c.Token)
 	req.Header.Set("User-Agent", c.UserAgent)
 	req.Header.Set("Accept", "application/json")
+
+	// Apply extra headers (preserve multi-values).
 	for k, vv := range headers {
-		if len(vv) > 0 {
-			req.Header.Set(k, vv[len(vv)-1])
+		if len(vv) == 0 {
+			continue
 		}
+		req.Header.Del(k)
+		req.Header[k] = append([]string(nil), vv...)
 	}
 
 	resp, err := c.HTTPClient.Do(req)
@@ -519,39 +627,56 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// Non-2xx: parse as APIError with a bounded snippet for debugging.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, defaultErrCap))
+		// Drain the rest to maximize chances of connection reuse.
 		_, _ = io.Copy(io.Discard, resp.Body)
 
 		ae := apierr.Parse(slurp, resp.StatusCode)
-
-		resp.Body = io.NopCloser(bytes.NewReader(slurp))
-		resp.ContentLength = int64(len(slurp))
+		// Keep headers/status accessible; body is already consumed (don't read it).
 		ae.Resp = resp
-
 		return ae
 	}
 
-	// No target to decode into → nothing else to do
+	// No target to decode into → drain body and return.
 	if v == nil {
-		// drain body to let Go reuse the connection
 		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil
 	}
 
-	// Read full body once; classify empty vs truncated vs valid JSON
-	b, rerr := io.ReadAll(resp.Body)
-	if rerr != nil {
-		// Server closed early (truncated) – bubble up for retry layer to decide.
-		return fmt.Errorf("read response: %w", rerr)
+	// Stream JSON decode to avoid buffering potentially large bodies,
+	// but keep good error semantics for retry layer.
+	cr := &countingReader{r: resp.Body}
+	dec := json.NewDecoder(cr)
+
+	if err := dec.Decode(v); err != nil {
+		// Empty body (204 or some 200s) is fine.
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		// Decoder returns io.ErrUnexpectedEOF for truncated JSON.
+		// Distinguish "transport truncation" vs "server sent broken JSON".
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			// If Content-Length is known and we read less than promised,
+			// treat as a truncated response -> retryable for higher layer.
+			if resp.ContentLength > 0 && cr.n < resp.ContentLength {
+				return fmt.Errorf("read response: %w", io.ErrUnexpectedEOF)
+			}
+			// Otherwise behave like json.Unmarshal on incomplete JSON:
+			// stable message + NOT retryable.
+			return fmt.Errorf("decode response: unexpected end of JSON input")
+		}
+
+		// Other decode errors (SyntaxError, type errors, etc.) -> non-retryable by default.
+		return fmt.Errorf("decode response: %w", err)
 	}
 
-	if len(bytes.TrimSpace(b)) == 0 {
-		// 204 or empty JSON body – treat as success.
-		return nil
-	}
-
-	if err := json.Unmarshal(b, v); err != nil {
+	// Strict trailing junk detection (optional). Keep if you want.
+	if err := dec.Decode(new(struct{})); err == nil {
+		return fmt.Errorf("decode response: trailing data")
+	} else if !errors.Is(err, io.EOF) {
 		return fmt.Errorf("decode response: %w", err)
 	}
 
@@ -572,15 +697,8 @@ func (c *Client) withExpBackoff(
 		isRetryable = apierr.IsRetryable
 	}
 
-	// Floors to avoid tight spins when caller sets zeros.
-	backoff := c.InitialBackoff
-	if backoff <= 0 {
-		backoff = 50 * time.Millisecond
-	}
-	max := c.MaxBackoff
-	if max <= 0 {
-		max = 2 * time.Second
-	}
+	maxRetries, totalAttempts := c.MaxRetries, c.MaxRetries+1
+	backoff, maxBackoff := normalizeBackoff(c.InitialBackoff, c.MaxBackoff)
 
 	// Reuse a single timer to avoid allocations on each retry.
 	timer := time.NewTimer(time.Hour)
@@ -595,67 +713,70 @@ func (c *Client) withExpBackoff(
 	for attempt := 0; ; attempt++ {
 		// Bail fast if caller already canceled / deadline exceeded.
 		if err := ctx.Err(); err != nil {
-			if label != "" {
-				return fmt.Errorf("%s: context: %w", label, err)
-			}
-			return err
+			return wrapCtxErr(label, attempt, totalAttempts, err)
 		}
 
-		// attempt is 0-based; pass it through as-is to op.
-		if err := op(attempt); err == nil {
+		err := op(attempt)
+		if err == nil {
 			return nil
-		} else {
-			// If ctx got canceled during the attempt, surface that cleanly.
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				if label != "" {
-					return fmt.Errorf("%s: context: %w", label, ctxErr)
-				}
-				return ctxErr
-			}
-
-			// Not retryable or retries exhausted.
-			if !isRetryable(err) || attempt >= c.MaxRetries {
-				if label != "" {
-					return fmt.Errorf("%s (attempt %d): %w", label, attempt+1, err)
-				}
-				return err
-			}
 		}
 
-		// Jittered sleep capped at max; ensure positive delay.
+		// If ctx got canceled during the attempt, surface that cleanly.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return wrapCtxErr(label, attempt, totalAttempts, ctxErr)
+		}
+
+		// Not retryable or retries exhausted.
+		if !isRetryable(err) || attempt >= maxRetries {
+			return wrapErr(label, attempt, totalAttempts, err)
+		}
+
+		// Sleep with jittered backoff, capped.
 		delay := apierr.JitteredBackoff(backoff)
 		if delay <= 0 {
 			delay = time.Millisecond
 		}
-		if delay > max {
-			delay = max
+		if delay > maxBackoff {
+			delay = maxBackoff
 		}
 
-		// Reset timer safely.
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(delay)
-
-		select {
-		case <-timer.C:
-			// proceed to next retry
-		case <-ctx.Done():
-			if label != "" {
-				return fmt.Errorf("%s: context: %w", label, ctx.Err())
-			}
-			return ctx.Err()
+		if err := sleepWithTimer(ctx, timer, delay); err != nil {
+			return wrapCtxErr(label, attempt, totalAttempts, err)
 		}
 
-		// Exponential growth capped at max.
+		// Exponential growth capped.
 		backoff *= 2
-		if backoff > max {
-			backoff = max
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
+}
+
+func normalizeBackoff(initial, max time.Duration) (time.Duration, time.Duration) {
+	if initial <= 0 {
+		initial = 50 * time.Millisecond
+	}
+	if max <= 0 {
+		max = 2 * time.Second
+	}
+	if max < initial {
+		max = initial
+	}
+	return initial, max
+}
+
+func wrapErr(label string, attempt, total int, err error) error {
+	if label == "" {
+		return err
+	}
+	return fmt.Errorf("%s (attempt %d/%d): %w", label, attempt+1, total, err)
+}
+
+func wrapCtxErr(label string, attempt, total int, err error) error {
+	if label == "" {
+		return err
+	}
+	return fmt.Errorf("%s (attempt %d/%d): context: %w", label, attempt+1, total, err)
 }
 
 // projectPath builds "projects/{id}/<suffix>" for project-scoped endpoints.

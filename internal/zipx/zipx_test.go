@@ -2,6 +2,7 @@ package zipx
 
 import (
 	"archive/zip"
+	"bytes"
 	"errors"
 	"io"
 	"io/fs"
@@ -187,4 +188,57 @@ func makeZip(t *testing.T, entries []zentry) string {
 		t.Fatalf("close zip: %v", err)
 	}
 	return f.Name()
+}
+
+func TestUnzip_NormalizesLeadingSlashAndBackslashes(t *testing.T) {
+	zp := makeZip(t, []zentry{
+		{name: "/rooted/ok.txt", data: []byte("1")},
+		{name: `win\path\ok2.txt`, data: []byte("2")},
+	})
+	dst := t.TempDir()
+
+	if err := Unzip(zp, dst, DefaultPolicy()); err != nil {
+		t.Fatalf("Unzip() error: %v", err)
+	}
+
+	if b, err := os.ReadFile(filepath.Join(dst, "rooted", "ok.txt")); err != nil || string(b) != "1" {
+		t.Fatalf("rooted/ok.txt missing/wrong: %v %q", err, b)
+	}
+	if b, err := os.ReadFile(filepath.Join(dst, "win", "path", "ok2.txt")); err != nil || string(b) != "2" {
+		t.Fatalf("win/path/ok2.txt missing/wrong: %v %q", err, b)
+	}
+}
+
+func TestUnzip_DotDotSegmentBlocked(t *testing.T) {
+	zp := makeZip(t, []zentry{
+		{name: "a/../../evil.txt", data: []byte("nope")},
+	})
+	dst := t.TempDir()
+
+	err := Unzip(zp, dst, DefaultPolicy())
+	if err == nil {
+		t.Fatalf("expected traversal error, got nil")
+	}
+	if !strings.Contains(err.Error(), ".. segment") && !strings.Contains(err.Error(), "unsafe") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUnzip_MaxTotalBytes(t *testing.T) {
+	zp := makeZip(t, []zentry{
+		{name: "a.bin", data: bytes.Repeat([]byte("a"), 80<<10)},
+		{name: "b.bin", data: bytes.Repeat([]byte("b"), 80<<10)},
+	})
+	dst := t.TempDir()
+
+	p := DefaultPolicy()
+	p.MaxTotalBytes = 100 << 10 // 100KiB
+
+	err := Unzip(zp, dst, p)
+	if err == nil {
+		t.Fatalf("expected total bytes cap error, got nil")
+	}
+	if !strings.Contains(err.Error(), "zip too large uncompressed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }

@@ -74,13 +74,17 @@ fp := filepath.Join(dir, "en.json")
 ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 defer cancel()
 
+// srcPath (3rd argument) is optional:
+// - if srcPath == "" -> uploader reads from params["filename"]
+// - if srcPath != "" -> uploader reads file bytes from srcPath,
+//   but still sends params["filename"] to Lokalise API as the remote filename.
 pid, err := uploader.Upload(ctx, client.UploadParams{
-    "filename": fp,
-    "lang_iso": "en",
-    // other request params...
-}, true) // pass false to skip polling
+	"filename": fp,      // sent to Lokalise (remote filename)
+	"lang_iso": "en",
+	// other request params...
+}, "", true) // srcPath="", poll=true (pass false to skip polling)
 if err != nil {
-    log.Fatal(err)
+	log.Fatal(err)
 }
 
 fmt.Println("Upload finished with process ID:", pid)
