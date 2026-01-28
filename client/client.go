@@ -110,7 +110,6 @@ type Option func(*Client) error
 
 type retryBodyFactory interface {
 	// NewBody must return a fresh body for each attempt.
-	// Caller (doWithRetry) will Close() it.
 	NewBody() (io.ReadCloser, error)
 }
 
@@ -291,14 +290,20 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 //   - We buffer the result channel so workers never block on send.
 //   - We enforce an overall deadline via context.WithDeadline.
 func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]QueuedProcess, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	wait, maxWait := c.pollConfig()
 	deadline := time.Now().Add(maxWait)
 
+	// pollCtx enforces the polling budget (PollMaxWait). When it expires,
+	// we should stop polling and return best-effort results (not an error),
+	// unless the caller's ctx itself is canceled/deadline-exceeded.
 	pollCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
 	ordered, processMap, pending := normalizeProcessIDs(processIDs)
-
 	if len(pending) == 0 {
 		return buildResults(ordered, processMap), nil
 	}
@@ -317,14 +322,21 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 	defer timer.Stop()
 
 	for len(pending) > 0 {
-		if err := pollCtx.Err(); err != nil {
+		// Caller cancellation/deadline is a hard stop (real error).
+		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+
+		// Poll budget expired: stop polling and return what we have.
+		if pollCtx.Err() != nil {
+			break
 		}
 
 		// One round: fetch all pending statuses concurrently (bounded).
 		procs, errs := c.pollRound(pollCtx, pending, maxConcurrent)
 
-		if err := pollCtx.Err(); err != nil {
+		// If caller ctx died during the round, surface that (real error).
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 
@@ -332,6 +344,11 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 		applyRound(processMap, pending, procs, errs)
 
 		if len(pending) == 0 {
+			break
+		}
+
+		// If budget expired during the round, stop now (best-effort return).
+		if pollCtx.Err() != nil {
 			break
 		}
 
@@ -344,8 +361,14 @@ func (c *Client) PollProcesses(ctx context.Context, processIDs []string) ([]Queu
 		if sleep <= 0 {
 			sleep = 10 * time.Millisecond
 		}
+
 		if err := sleepWithTimer(pollCtx, timer, sleep); err != nil {
-			return nil, err
+			// If caller ctx is canceled/deadline-exceeded -> error.
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr
+			}
+			// Otherwise it's our polling budget -> best-effort return.
+			break
 		}
 
 		// Exponential backoff for next round, clipped to remaining budget.
@@ -528,26 +551,36 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		headers.Set("Content-Type", "application/json")
 	}
 
-	// 1) Preferred: retryBodyFactory (fresh body each attempt)
+	// 1) Preferred: retryBodyFactory (fresh body each attempt).
 	if f, ok := body.(retryBodyFactory); ok {
-		return c.withExpBackoff(ctx, "request", func(_ int) (err error) {
+		return c.withExpBackoff(ctx, "request", func(_ int) error {
 			rc, err := f.NewBody()
 			if err != nil {
 				return fmt.Errorf("create request body: %w", err)
 			}
-			defer func() {
-				if cerr := rc.Close(); err == nil && cerr != nil {
-					err = cerr
-				}
-			}()
-
-			err = c.doRequest(ctx, method, path, rc, v, headers)
-			return err
+			// pass rc as-is (it is io.ReadCloser) so Transport can close it properly
+			return c.doRequest(ctx, method, path, rc, v, headers)
 		}, nil)
 	}
 
-	// 2) Seekable: rewind per attempt
+	// 2) Seekable: rewind per attempt.
+	// If it's also a Closer (e.g. *os.File), we must prevent net/http from closing it per attempt,
+	// otherwise retries break. So we hide Close() and close once after all attempts.
 	if rs, ok := body.(io.ReadSeeker); ok {
+		if cl, ok := body.(io.Closer); ok {
+			defer func() { _ = cl.Close() }()
+
+			return c.withExpBackoff(ctx, "request", func(_ int) error {
+				if _, err := rs.Seek(0, io.SeekStart); err != nil {
+					return fmt.Errorf("rewind body: %w", err)
+				}
+				// Hide Close(): wrapper does NOT implement io.ReadCloser.
+				rdr := struct{ io.Reader }{rs}
+				return c.doRequest(ctx, method, path, rdr, v, headers)
+			}, nil)
+		}
+
+		// ReadSeeker but not Closer: safe to pass directly.
 		return c.withExpBackoff(ctx, "request", func(_ int) error {
 			if _, err := rs.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("rewind body: %w", err)
@@ -556,14 +589,13 @@ func (c *Client) doWithRetry(ctx context.Context, method, path string, body io.R
 		}, nil)
 	}
 
-	// 3) Fallback: buffer once (may allocate!)
+	// 3) Fallback: buffer once (may allocate).
 	var payload []byte
 	if body != nil {
 		b, err := io.ReadAll(body)
 		if err != nil {
 			return fmt.Errorf("buffer request body: %w", err)
 		}
-		// If caller gave us a ReadCloser-ish thing, close it now that we buffered it.
 		if cbody, ok := body.(io.Closer); ok {
 			_ = cbody.Close()
 		}
@@ -589,18 +621,29 @@ func (cr *countingReader) Read(p []byte) (int, error) {
 // Body is sent as-is. If v is nil, the body is drained and discarded;
 // otherwise it is decoded as JSON.
 func (c *Client) doRequest(ctx context.Context, method, path string, body io.Reader, v any, headers http.Header) error {
+	// Close request body ONLY if we fail before http.Client.Do().
+	closeBody := func() {
+		if body == nil {
+			return
+		}
+		if cl, ok := body.(io.Closer); ok {
+			_ = cl.Close()
+		}
+	}
+
 	fullURL, err := url.JoinPath(c.BaseURL, path)
 	if err != nil {
+		closeBody()
 		return fmt.Errorf("join url: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, fullURL, body)
 	if err != nil {
+		closeBody()
 		return fmt.Errorf("create request: %w", err)
 	}
 
 	// Best-effort Content-Length for common reader types (helps traces; avoids chunked uploads).
-	// We don't try to be too clever here; streaming bodies remain unknown length.
 	switch b := body.(type) {
 	case *bytes.Reader:
 		req.ContentLength = int64(b.Len())
@@ -612,7 +655,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 	req.Header.Set("User-Agent", c.UserAgent)
 	req.Header.Set("Accept", "application/json")
 
-	// Apply extra headers (preserve multi-values).
 	for k, vv := range headers {
 		if len(vv) == 0 {
 			continue
@@ -623,6 +665,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body io.Rea
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		// after Do() net/http already handled closing the request body.
 		return fmt.Errorf("send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -781,5 +824,5 @@ func wrapCtxErr(label string, attempt, total int, err error) error {
 
 // projectPath builds "projects/{id}/<suffix>" for project-scoped endpoints.
 func (c *Client) projectPath(suffix string) string {
-	return fmt.Sprintf("projects/%s/%s", c.ProjectID, suffix)
+	return fmt.Sprintf("projects/%s/%s", url.PathEscape(c.ProjectID), suffix)
 }

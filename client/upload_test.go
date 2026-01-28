@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -182,7 +183,6 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 	cli, _ := client.NewClient(token, projectID, nil)
 	u := client.NewUploader(cli)
 
-	// file still must exist (we stat it)
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "payload.json")
 	if err := os.WriteFile(fp, []byte(`ignored`), 0o644); err != nil {
@@ -623,5 +623,160 @@ func TestUploader_Upload_ContextCancelDuringBodyBuild(t *testing.T) {
 
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want ctx deadline exceeded, got %v", err)
+	}
+}
+
+func TestUploader_Upload_DataProvided_DoesNotNeedLocalFile(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+
+	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
+		var got map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+			t.Fatalf("decode req: %v", err)
+		}
+
+		if got["filename"] != "does/not/exist.json" {
+			t.Fatalf("filename = %v, want %q", got["filename"], "does/not/exist.json")
+		}
+		if got["lang_iso"] != "en" {
+			t.Fatalf("lang_iso = %v, want en", got["lang_iso"])
+		}
+		if got["data"] != "dGVzdA==" {
+			t.Fatalf("data = %v, want dGVzdA==", got["data"])
+		}
+
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"nopfile_1"}}`), nil
+	})
+
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := client.NewUploader(cli)
+
+	params := client.UploadParams{
+		"filename": "does/not/exist.json",
+		"lang_iso": "en",
+		"data":     "dGVzdA==",
+	}
+
+	pid, err := u.Upload(context.Background(), params, "", false)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if pid != "nopfile_1" {
+		t.Fatalf("pid = %q, want nopfile_1", pid)
+	}
+}
+
+func TestUploader_Upload_SrcPathOverridesLocalReadPath(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+
+	dir := t.TempDir()
+	src := filepath.Join(dir, "actual.json")
+	wantRaw := []byte(`{"hello":"from-srcPath"}`)
+	if err := os.WriteFile(src, wantRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantB64 := base64.StdEncoding.EncodeToString(wantRaw)
+
+	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
+		var got map[string]any
+		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+			t.Fatalf("decode req: %v", err)
+		}
+
+		if got["filename"] != "locales/%LANG_ISO%.json" {
+			t.Fatalf("filename = %v, want %q", got["filename"], "locales/%LANG_ISO%.json")
+		}
+		if got["lang_iso"] != "en" {
+			t.Fatalf("lang_iso = %v, want en", got["lang_iso"])
+		}
+		if got["data"] != wantB64 {
+			t.Fatalf("data mismatch: got %v, want %v", got["data"], wantB64)
+		}
+
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"src_override"}}`), nil
+	})
+
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := client.NewUploader(cli)
+
+	params := client.UploadParams{
+		"filename": "locales/%LANG_ISO%.json",
+		"lang_iso": "en",
+	}
+
+	pid, err := u.Upload(context.Background(), params, src, false)
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if pid != "src_override" {
+		t.Fatalf("pid = %q, want src_override", pid)
+	}
+}
+
+func TestUploader_Upload_ReadFilePermissionDeniedAfterStat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod permission semantics are flaky on windows")
+	}
+
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+
+	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
+		_, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		return httpmock.NewStringResponse(200, `{"process":{"process_id":"should_not_happen"}}`), nil
+	})
+
+	cli, err := client.NewClient(token, projectID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "no_read.json")
+	if err := os.WriteFile(fp, []byte(`{"x":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Chmod(fp, 0); err != nil {
+		t.Fatalf("chmod 0: %v", err)
+	}
+	defer func() { _ = os.Chmod(fp, 0o644) }()
+
+	if f, err := os.Open(fp); err == nil {
+		_ = f.Close()
+		t.Skip("environment still allows reading chmod 0 file; skipping")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	_, err = u.Upload(ctx, client.UploadParams{
+		"filename": fp,
+		"lang_iso": "en",
+	}, "", false)
+
+	if err == nil {
+		t.Fatal("want permission error, got nil")
+	}
+	if !errors.Is(err, os.ErrPermission) && !strings.Contains(strings.ToLower(err.Error()), "permission") {
+		t.Fatalf("want permission denied, got %v", err)
 	}
 }

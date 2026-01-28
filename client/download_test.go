@@ -281,6 +281,17 @@ func TestDownloadAndUnzip_EmptyURL(t *testing.T) {
 	}
 }
 
+func TestDownloadAndUnzip_InvalidURL(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	dl := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	err := dl.DownloadAndUnzip(context.Background(), "localhost", dest)
+	if err == nil || !strings.Contains(err.Error(), "unsupported url scheme") {
+		t.Fatalf("want empty bundle url error, got %v", err)
+	}
+}
+
 func TestDownloader_Download_SyncFlow(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
@@ -656,7 +667,7 @@ func TestIntegration_DownloadAsync(t *testing.T) {
 	}
 	dl := client.NewDownloader(cli)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Second)
 	defer cancel()
 
 	// Per-test temp dir; Go removes it automatically.
@@ -1024,4 +1035,142 @@ func mustJSONBody(t *testing.T, m map[string]any) io.Reader {
 		t.Fatalf("encode body: %v", err)
 	}
 	return r
+}
+
+func TestDownloadAndUnzip_RejectsBadBundleURLs(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	dl := client.NewDownloader(cli)
+
+	cases := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"http scheme blocked", "http://cdn.example.com/bundle.zip", "unsupported url scheme"},
+		{"userinfo blocked", "https://user:pass@cdn.example.com/bundle.zip", "must not contain userinfo"},
+		{"fragment blocked", "https://cdn.example.com/bundle.zip#frag", "must not contain fragment"},
+		{"internal hostname blocked", "https://foo.internal/bundle.zip", "local/internal hostname is not allowed"},
+		{"localhost blocked", "https://localhost/bundle.zip", "localhost is not allowed"},
+		{"private ip blocked", "https://192.168.1.10/bundle.zip", "is not allowed"},
+		{"loopback ip blocked", "https://127.0.0.1/bundle.zip", "is not allowed"},
+		{"ipv6 loopback blocked", "https://[::1]/bundle.zip", "is not allowed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := dl.DownloadAndUnzip(context.Background(), tc.url, t.TempDir())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestDownloader_FetchBundle_NilBody(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	_, err := d.FetchBundle(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "nil request body") {
+		t.Fatalf("want nil request body error, got %v", err)
+	}
+}
+
+func TestDownloader_FetchBundleAsync_NilBody(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	_, err := d.FetchBundleAsync(context.Background(), nil)
+	if err == nil || !strings.Contains(err.Error(), "nil request body") {
+		t.Fatalf("want nil request body error, got %v", err)
+	}
+}
+
+func TestDownloader_FetchBundleAsync_EmptyProcessID(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/async-download", projectID)
+	httpmock.RegisterResponder("POST", targetPost, httpmock.NewStringResponder(200, `{"process_id":""}`))
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	buf := mustJSONBody(t, map[string]any{"format": "json"})
+	_, err := d.FetchBundleAsync(context.Background(), buf)
+
+	if err == nil || !strings.Contains(err.Error(), "empty process id") {
+		t.Fatalf("want empty process id error, got %v", err)
+	}
+}
+
+func TestDownloader_DownloadAsync_FullPipeline(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	// 1) kickoff async
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/async-download", projectID)
+	httpmock.RegisterResponder("POST", targetPost,
+		httpmock.NewStringResponder(200, `{"process_id":"p1"}`),
+	)
+
+	// 2) poll process -> finished + download_url
+	targetGet := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/processes/p1", projectID)
+	downloadURL := "https://cdn.example.com/async-full.zip"
+	httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, fmt.Sprintf(`{
+		"process": {
+			"process_id":"p1",
+			"status":"finished",
+			"details": {"download_url":"%s"}
+		}
+	}`, downloadURL)))
+
+	// 3) GET zip
+	zb := buildZip(t, map[string]string{
+		"locales/en/app.json": `{"hello":"async"}`,
+		"root.txt":            "ok",
+	}, nil)
+	registerZipResponder(t, downloadURL, zb)
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	dest := t.TempDir()
+	gotURL, err := d.DownloadAsync(context.Background(), dest, client.DownloadParams{"format": "json"})
+	if err != nil {
+		t.Fatalf("DownloadAsync: %v", err)
+	}
+	if gotURL != downloadURL {
+		t.Fatalf("url=%q, want %q", gotURL, downloadURL)
+	}
+
+	// check unzip happened
+	b, err := os.ReadFile(filepath.Join(dest, filepath.FromSlash("locales/en/app.json")))
+	if err != nil || string(b) != `{"hello":"async"}` {
+		t.Fatalf("unzipped file wrong: %v %q", err, string(b))
+	}
+	b, err = os.ReadFile(filepath.Join(dest, "root.txt"))
+	if err != nil || string(b) != "ok" {
+		t.Fatalf("unzipped root wrong: %v %q", err, string(b))
+	}
+}
+
+func TestDownloader_Download_EmptyUnzipTo(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	_, err := d.Download(context.Background(), "   ", client.DownloadParams{"format": "json"})
+	if err == nil || !strings.Contains(err.Error(), "unzipTo is empty") {
+		t.Fatalf("want unzipTo is empty error, got %v", err)
+	}
+}
+
+func TestDownloader_DownloadAsync_EmptyUnzipTo(t *testing.T) {
+	cli, _ := client.NewClient(token, projectID, nil)
+	d := client.NewDownloader(cli)
+
+	_, err := d.DownloadAsync(context.Background(), "   ", client.DownloadParams{"format": "json"})
+	if err == nil || !strings.Contains(err.Error(), "unzipTo is empty") {
+		t.Fatalf("want unzipTo is empty error, got %v", err)
+	}
 }

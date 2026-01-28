@@ -2,6 +2,7 @@ package client_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -92,35 +93,44 @@ func TestPollProcesses_QueuedToFinished_SingleID(t *testing.T) {
 	process := "upl_123"
 	ua := "lokex-test/ua"
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+	// Собираем ошибки из handler'а сюда (НЕ Fatal внутри handler-а).
+	errCh := make(chan error, 8)
+	nonBlockingSend := func(err error) {
+		if err == nil {
+			return
+		}
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
 
-		// assert headers
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		curHit := atomic.AddInt32(&hits, 1)
+
 		if got := r.Header.Get("X-Api-Token"); got != token {
-			t.Fatalf("X-Api-Token = %q, want %q", got, token)
+			nonBlockingSend(fmt.Errorf("X-Api-Token = %q, want %q", got, token))
 		}
 		if got := r.Header.Get("User-Agent"); got != ua {
-			t.Fatalf("User-Agent = %q, want %q", got, ua)
+			nonBlockingSend(fmt.Errorf("User-Agent = %q, want %q", got, ua))
 		}
 		if r.Method != http.MethodGet {
-			t.Fatalf("method = %s, want GET", r.Method)
+			nonBlockingSend(fmt.Errorf("method = %s, want GET", r.Method))
 		}
 
-		// path like: /projects/<project>/processes/<id>
-		wantSuffix := "/projects/" + project + "/processes/" + process
-		if got := r.URL.Path; got != wantSuffix {
-			t.Fatalf("path = %s, want %s", got, wantSuffix)
+		wantPath := "/projects/" + project + "/processes/" + process
+		if got := r.URL.Path; got != wantPath {
+			nonBlockingSend(fmt.Errorf("path = %s, want %s", got, wantPath))
 		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
 
 		// first hit → queued, second → finished
-		if atomic.LoadInt32(&hits) == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(200)
+		if curHit == 1 {
 			_, _ = w.Write([]byte(`{"process":{"process_id":"upl_123","status":"queued","message":"","details":{}}}`))
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
 		_, _ = w.Write([]byte(`{"process":{"process_id":"upl_123","status":"finished","message":"","details":{"download_url":"https://example/file.zip"}}}`))
 	}))
 	defer srv.Close()
@@ -142,6 +152,13 @@ func TestPollProcesses_QueuedToFinished_SingleID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
+
+	select {
+	case e := <-errCh:
+		t.Fatal(e)
+	default:
+	}
+
 	if len(res) != 1 || res[0].ProcessID != process || res[0].Status != "finished" {
 		t.Fatalf("bad result: %#v", res)
 	}
@@ -362,5 +379,77 @@ func TestPollProcesses_NonRetryableError_MarksFailedAndContinues(t *testing.T) {
 	}
 	if got[1].ProcessID != "y" || got[1].Status != client.StatusFinished {
 		t.Fatalf("y: got=%#v, want finished", got[1])
+	}
+}
+
+func TestPollProcesses_NilContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"process":{"process_id":"x","status":"finished","message":"","details":{}}}`))
+	}))
+	defer srv.Close()
+
+	c, _ := client.NewClient("t", "p",
+		client.WithBaseURL(srv.URL),
+		client.WithHTTPClient(srv.Client()),
+		client.WithPollWait(1*time.Millisecond, 50*time.Millisecond),
+	)
+
+	//lint:ignore SA1012 intentionally passing nil context in this test
+	got, err := c.PollProcesses(nil, []string{"x"}) //nolint:staticcheck // nil ctx is required for this test
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Status != client.StatusFinished {
+		t.Fatalf("%#v", got)
+	}
+}
+
+func TestPollProcesses_Duplicates_DoNotSpamRequests(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"process":{"process_id":"a","status":"finished","message":"","details":{}}}`))
+	}))
+	defer srv.Close()
+
+	c, _ := client.NewClient("t", "p",
+		client.WithBaseURL(srv.URL),
+		client.WithHTTPClient(srv.Client()),
+		client.WithPollWait(1*time.Millisecond, 50*time.Millisecond),
+	)
+
+	got, err := c.PollProcesses(context.Background(), []string{"a", "a", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len=%d got=%#v", len(got), got)
+	}
+	if hits != 1 {
+		t.Fatalf("hits=%d want 1", hits)
+	}
+}
+
+func TestPollProcesses_PollBudgetExpires_ReturnsQueued(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"process":{"process_id":"x","status":"queued","message":"","details":{}}}`))
+	}))
+	defer srv.Close()
+
+	c, _ := client.NewClient("t", "p",
+		client.WithBaseURL(srv.URL),
+		client.WithHTTPClient(srv.Client()),
+		client.WithPollWait(5*time.Millisecond, 20*time.Millisecond),
+	)
+
+	got, err := c.PollProcesses(context.Background(), []string{"x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Status != client.StatusQueued {
+		t.Fatalf("got=%#v", got)
 	}
 }

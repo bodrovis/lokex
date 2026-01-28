@@ -226,10 +226,11 @@ func parseUploadDataSpec(params UploadParams) (uploadDataSpec, error) {
 	switch t := v.(type) {
 	case string:
 		// fail fast BEFORE we create the pipe / start goroutines / send HTTP.
-		if err := validateStdBase64String(t); err != nil {
+		norm, err := validateAndNormalizeStdBase64String(t)
+		if err != nil {
 			return uploadDataSpec{}, err
 		}
-		spec.dataString = t
+		spec.dataString = norm
 	case []byte:
 		spec.dataWasBytes = true
 		spec.dataBytes = t
@@ -368,17 +369,21 @@ func writeUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) err
 	return err
 }
 
-// validateStdBase64String ensures s can be safely embedded into a JSON string
-// without escaping (i.e., it contains only StdEncoding base64 chars).
-func validateStdBase64String(s string) error {
+func validateAndNormalizeStdBase64String(s string) (string, error) {
+	s = strings.TrimSpace(s)
 	if s == "" {
-		return fmt.Errorf("upload: 'data' cannot be empty")
-	}
-	if len(s)%4 != 0 {
-		return fmt.Errorf("upload: 'data' base64 length must be multiple of 4")
+		return "", fmt.Errorf("upload: 'data' cannot be empty")
 	}
 
-	// '=' only allowed at the end, max 2.
+	// Std base64 cannot have length%4 == 1 (padded or not).
+	switch len(s) % 4 {
+	case 0, 2, 3:
+		// ok
+	default:
+		return "", fmt.Errorf("upload: 'data' base64 length is invalid (len%%4==1)")
+	}
+
+	// Validate alphabet and padding placement.
 	pad := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -388,28 +393,36 @@ func validateStdBase64String(s string) error {
 			'0' <= c && c <= '9',
 			c == '+', c == '/':
 			if pad != 0 {
-				return fmt.Errorf("upload: invalid base64 padding position")
+				return "", fmt.Errorf("upload: invalid base64 padding position")
 			}
 		case c == '=':
 			pad++
 			if pad > 2 {
-				return fmt.Errorf("upload: invalid base64 padding")
+				return "", fmt.Errorf("upload: invalid base64 padding")
 			}
 		default:
-			return fmt.Errorf("upload: 'data' contains non-base64 char %q", c)
+			return "", fmt.Errorf("upload: 'data' contains non-base64 char %q", c)
 		}
 	}
 
 	// If padding exists, it must occupy only the last pad chars.
 	if pad > 0 {
+		if len(s)%4 != 0 {
+			return "", fmt.Errorf("upload: invalid base64 padding (length must be multiple of 4 when '=' present)")
+		}
 		for i := len(s) - pad; i < len(s); i++ {
 			if s[i] != '=' {
-				return fmt.Errorf("upload: invalid base64 padding")
+				return "", fmt.Errorf("upload: invalid base64 padding")
 			}
 		}
+		return s, nil
 	}
 
-	return nil
+	// No '=' padding provided -> normalize to StdEncoding by adding '='.
+	if m := len(s) % 4; m != 0 {
+		s += strings.Repeat("=", 4-m)
+	}
+	return s, nil
 }
 
 // cloneAndValidateParams copies user params and extracts a clean file path.
