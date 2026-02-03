@@ -69,6 +69,7 @@ type QueuedProcess struct {
 	ProcessID   string `json:"process_id"`
 	Status      string `json:"status"`
 	DownloadURL string `json:"download_url,omitempty"`
+	Message     string `json:"message,omitempty"`
 }
 
 // processResponse mirrors the subset of the Lokalise response we care about.
@@ -99,7 +100,8 @@ type countingReader struct {
 func (pr *processResponse) ToQueuedProcess() QueuedProcess {
 	return QueuedProcess{
 		ProcessID:   pr.Process.ProcessID,
-		Status:      pr.Process.Status,
+		Status:      normalizeString(pr.Process.Status),
+		Message:     strings.TrimSpace(pr.Process.Message),
 		DownloadURL: pr.Process.Details.DownloadURL,
 	}
 }
@@ -825,4 +827,8 @@ func wrapCtxErr(label string, attempt, total int, err error) error {
 // projectPath builds "projects/{id}/<suffix>" for project-scoped endpoints.
 func (c *Client) projectPath(suffix string) string {
 	return fmt.Sprintf("projects/%s/%s", url.PathEscape(c.ProjectID), suffix)
+}
+
+func normalizeString(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }

@@ -185,23 +185,32 @@ func (d *Downloader) FetchBundleAsync(ctx context.Context, body io.Reader) (stri
 	}
 
 	p := results[0]
+	st := normalizeString(p.Status)
 
 	// 3) Interpret result.
-	switch p.Status {
+	switch st {
 	case StatusFinished:
 		u := strings.TrimSpace(p.DownloadURL)
 		if u == "" {
+			if msg := strings.TrimSpace(p.Message); msg != "" {
+				return "", fmt.Errorf("fetch bundle async: process %s finished but download_url is empty: %s", p.ProcessID, msg)
+			}
 			return "", fmt.Errorf("fetch bundle async: process %s finished but download_url is empty", p.ProcessID)
 		}
+
 		return u, nil
 
 	case StatusFailed:
+		msg := strings.TrimSpace(p.Message)
+		if msg != "" {
+			return "", fmt.Errorf("fetch bundle async: process %s failed: %s", p.ProcessID, msg)
+		}
 		return "", fmt.Errorf("fetch bundle async: process %s failed", p.ProcessID)
 
 	default:
 		// Usually means we ran out of polling budget (PollMaxWait) but ctx might still be alive,
 		// or Lokalise is slow and never reached terminal before our poll deadline.
-		return "", fmt.Errorf("fetch bundle async: process %s did not finish (status=%s)", p.ProcessID, p.Status)
+		return "", fmt.Errorf("fetch bundle async: process %s did not finish (status=%q)", p.ProcessID, st)
 	}
 }
 

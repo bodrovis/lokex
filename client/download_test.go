@@ -776,6 +776,80 @@ func TestDownloader_FetchBundleAsync(t *testing.T) {
 		}
 	})
 
+	t.Run("failed process with message", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+
+		httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+		"process": {
+			"process_id":"xyz",
+			"status":"failed",
+			"message":"No keys for export with current export settings"
+		}
+	}`))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := client.NewDownloader(cli)
+
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
+
+		_, err = d.FetchBundleAsync(context.Background(), buf)
+		if err == nil {
+			t.Fatalf("want error, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "failed") {
+			t.Fatalf("want failed error, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "No keys for export") {
+			t.Fatalf("want server message in error, got %v", err)
+		}
+	})
+
+	t.Run("failed status with whitespace is normalized", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+
+		// Note the trailing whitespace/newline in status.
+		httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
+		"process": {
+			"process_id":"xyz",
+			"status":"failed \n",
+			"message":"boom"
+		}
+	}`))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := client.NewDownloader(cli)
+
+		buf := mustJSONBody(t, map[string]any{"format": "json"})
+
+		_, err = d.FetchBundleAsync(context.Background(), buf)
+		if err == nil {
+			t.Fatalf("want error, got nil")
+		}
+
+		// This ensures we didn't fall into the default branch ("did not finish").
+		if strings.Contains(err.Error(), "did not finish") {
+			t.Fatalf("status should be normalized to failed, got %v", err)
+		}
+		if !strings.Contains(err.Error(), "failed: boom") {
+			t.Fatalf("want failed with message, got %v", err)
+		}
+	})
+
 	t.Run("timeout", func(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
