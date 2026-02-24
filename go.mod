@@ -1,6 +1,6 @@
 module github.com/bodrovis/lokex/v2
 
-go 1.25
+go 1.26
 
 require github.com/joho/godotenv v1.5.1
 
