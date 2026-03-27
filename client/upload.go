@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bodrovis/lokex/v2/internal/utils"
 )
 
 // Uploader wraps a *Client to perform Lokalise file uploads.
@@ -79,6 +81,8 @@ func NewUploader(c *Client) *Uploader {
 	}
 }
 
+var ErrNoProcessID = errors.New("upload: no process id returned")
+
 // Upload uploads a file to Lokalise using /files/upload.
 // Behavior:
 //  1. Validates and cleans the "filename" param, ensures it's a regular file (unless data is provided explicitly).
@@ -123,6 +127,12 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath stri
 
 	processID, err := u.kickoffUploadStreaming(ctx, body, readPath)
 	if err != nil {
+		if errors.Is(err, ErrNoProcessID) {
+			if poll {
+				return "", fmt.Errorf("upload: polling requested but unavailable: %w", err)
+			}
+			return "", nil
+		}
 		return "", err
 	}
 
@@ -159,7 +169,7 @@ func (u *Uploader) kickoffUploadStreaming(ctx context.Context, body UploadParams
 
 	processID := strings.TrimSpace(resp.Process.ProcessID)
 	if processID == "" {
-		return "", fmt.Errorf("upload: kickoff: empty process id in response")
+		return "", ErrNoProcessID
 	}
 	return processID, nil
 }
@@ -487,7 +497,7 @@ func (u *Uploader) pollUntilFinished(ctx context.Context, processID string) (str
 	}
 
 	p := results[0]
-	st := normalizeString(p.Status)
+	st := utils.NormalizeString(p.Status)
 
 	switch st {
 	case StatusFinished:

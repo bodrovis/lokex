@@ -360,12 +360,42 @@ func TestUploader_Upload_ReadFileError(t *testing.T) {
 	}
 }
 
-func TestUploader_Upload_EmptyProcessIDIsError(t *testing.T) {
+func TestUploader_Upload_EmptyProcessID_NoPoll_NoError(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
 
 	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
-	httpmock.RegisterResponder("POST", targetPost, httpmock.NewStringResponder(200, `{"process":{"process_id":""}}`))
+	httpmock.RegisterResponder("POST", targetPost,
+		httpmock.NewStringResponder(200, `{"process":{"process_id":""}}`),
+	)
+
+	cli, _ := client.NewClient(token, projectID, nil)
+	u := client.NewUploader(cli)
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "en.json")
+	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+
+	processID, err := u.Upload(context.Background(), client.UploadParams{
+		"filename": fp,
+		"lang_iso": "en",
+	}, "", false)
+	if err != nil {
+		t.Fatalf("want no error when poll=false and process id is empty, got %v", err)
+	}
+	if processID != "" {
+		t.Fatalf("want empty process id, got %q", processID)
+	}
+}
+
+func TestUploader_Upload_EmptyProcessID_WithPoll_Error(t *testing.T) {
+	httpmock.Activate()
+	defer httpmock.DeactivateAndReset()
+
+	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	httpmock.RegisterResponder("POST", targetPost,
+		httpmock.NewStringResponder(200, `{"process":{"file_id":"abc"}}`),
+	)
 
 	cli, _ := client.NewClient(token, projectID, nil)
 	u := client.NewUploader(cli)
@@ -375,10 +405,14 @@ func TestUploader_Upload_EmptyProcessIDIsError(t *testing.T) {
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
-		"filename": fp, "lang_iso": "en",
-	}, "", false)
-	if err == nil || !strings.Contains(err.Error(), "empty process id") {
-		t.Fatalf("want empty process id error, got %v", err)
+		"filename": fp,
+		"lang_iso": "en",
+	}, "", true)
+	if err == nil {
+		t.Fatal("want error when poll=true and process id is empty, got nil")
+	}
+	if !strings.Contains(err.Error(), "polling requested but unavailable") {
+		t.Fatalf("want polling unavailable error, got %v", err)
 	}
 }
 
@@ -399,8 +433,8 @@ func TestUploader_Upload_Allows204EmptyBody_ButErrorsOnMissingProcess(t *testing
 
 	_, err := u.Upload(context.Background(), client.UploadParams{
 		"filename": fp, "lang_iso": "en",
-	}, "", false)
-	if err == nil || !strings.Contains(err.Error(), "empty process id") {
+	}, "", true)
+	if err == nil || !strings.Contains(err.Error(), "no process id returned") {
 		t.Fatalf("want empty process id error, got %v", err)
 	}
 }
