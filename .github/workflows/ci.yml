@@ -28,3 +28,4 @@ jobs:
       with:
         token: ${{ secrets.QLTY_COVERAGE_TOKEN }}
         files: coverage.out
+        strip-prefix: v2/
