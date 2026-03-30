@@ -64,12 +64,6 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 		}
 	}
 
-	// final normalization (in case WithBaseURL was not used)
-	c.BaseURL = strings.TrimSpace(c.BaseURL)
-	if !strings.HasSuffix(c.BaseURL, "/") {
-		c.BaseURL += "/"
-	}
-
 	return c, nil
 }
 

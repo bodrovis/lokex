@@ -20,7 +20,7 @@ func LoadDotEnv(paths ...string) error {
 	}
 
 	// try project root
-	if rd, err := projectRoot(); err == nil {
+	if rd, err := ProjectRoot(); err == nil {
 		if _, err := os.Stat(filepath.Join(rd, ".env")); err == nil {
 			return godotenv.Load(filepath.Join(rd, ".env"))
 		}

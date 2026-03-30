@@ -10,6 +10,7 @@ var (
 	rootOnce sync.Once
 	rootDir  string
 	rootErr  error
+	getwd    = os.Getwd
 )
 
 var markerFiles = []string{"go.mod", ".git"} // treat either as repo root
@@ -31,9 +32,10 @@ func FindProjectRoot(startDir string) (string, error) {
 	}
 }
 
-func projectRoot() (string, error) {
+// ProjectRoot returns the cached project root discovered from the current working directory.
+func ProjectRoot() (string, error) {
 	rootOnce.Do(func() {
-		wd, err := os.Getwd()
+		wd, err := getwd()
 		if err != nil {
 			rootErr = err
 			return
@@ -41,4 +43,14 @@ func projectRoot() (string, error) {
 		rootDir, rootErr = FindProjectRoot(wd)
 	})
 	return rootDir, rootErr
+}
+
+func TestOnlySetGetwd(fn func() (string, error)) {
+	getwd = fn
+}
+
+func TestOnlyResetProjectRootCache() {
+	rootOnce = sync.Once{}
+	rootDir = ""
+	rootErr = nil
 }

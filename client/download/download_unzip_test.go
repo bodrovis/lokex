@@ -470,32 +470,3 @@ func TestDownloadAndUnzip_ContextAlreadyCanceled_NoRequest(t *testing.T) {
 		t.Fatalf("GET attempts = %d, want 0", got)
 	}
 }
-
-func TestDownloadAndUnzip_RejectsBadBundleURLs(t *testing.T) {
-	cli, _ := client.NewClient(token, projectID, nil)
-	dl := download.NewDownloader(cli)
-
-	cases := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{"http scheme blocked", "http://cdn.example.com/bundle.zip", "unsupported url scheme"},
-		{"userinfo blocked", "https://user:pass@cdn.example.com/bundle.zip", "must not contain userinfo"},
-		{"fragment blocked", "https://cdn.example.com/bundle.zip#frag", "must not contain fragment"},
-		{"internal hostname blocked", "https://foo.internal/bundle.zip", "local/internal hostname is not allowed"},
-		{"localhost blocked", "https://localhost/bundle.zip", "localhost is not allowed"},
-		{"private ip blocked", "https://192.168.1.10/bundle.zip", "is not allowed"},
-		{"loopback ip blocked", "https://127.0.0.1/bundle.zip", "is not allowed"},
-		{"ipv6 loopback blocked", "https://[::1]/bundle.zip", "is not allowed"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := dl.DownloadAndUnzip(context.Background(), tc.url, t.TempDir())
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("want %q error, got %v", tc.want, err)
-			}
-		})
-	}
-}

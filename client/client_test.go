@@ -53,6 +53,47 @@ func TestNewClient_Defaults(t *testing.T) {
 	}
 }
 
+func TestNewClient_RequiredFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		token     string
+		projectID string
+		wantErr   string
+	}{
+		{
+			name:      "empty token after trim",
+			token:     "   ",
+			projectID: "proj456",
+			wantErr:   "API token is required",
+		},
+		{
+			name:      "empty projectID after trim",
+			token:     "tok123",
+			projectID: "   ",
+			wantErr:   "project ID is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, err := client.NewClient(tt.token, tt.projectID)
+			if err == nil {
+				t.Fatal("NewClient() error = nil, want error")
+			}
+			if err.Error() != tt.wantErr {
+				t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+			}
+			if c != nil {
+				t.Fatalf("client = %#v, want nil", c)
+			}
+		})
+	}
+}
+
 func TestNewClient_TrimTokenAndProjectID(t *testing.T) {
 	t.Parallel()
 
