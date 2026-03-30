@@ -2,6 +2,8 @@
 
 ![GitHub Release](https://img.shields.io/github/v/release/bodrovis/lokex)
 ![CI](https://github.com/bodrovis/lokex/actions/workflows/ci.yml/badge.svg)
+[![Code Coverage](https://qlty.sh/gh/bodrovis/projects/lokex/coverage.svg)](https://qlty.sh/gh/bodrovis/projects/lokex)
+[![Maintainability](https://qlty.sh/gh/bodrovis/projects/lokex/maintainability.svg)](https://qlty.sh/gh/bodrovis/projects/lokex)
 
 `lokex` is a Go client for uploading and downloading translations from [Lokalise](https://lokalise.com). It provides a thin wrapper around the Lokalise API with retry/backoff, async polling, safe unzipping, and strict upload validation.
 
