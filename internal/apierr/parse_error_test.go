@@ -49,6 +49,29 @@ func TestParse_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestParse_JSONArray_FallsBackToUnhandled(t *testing.T) {
+	body := []byte(`["oops"]`)
+	st := http.StatusBadRequest
+
+	e := apierr.Parse(body, st)
+
+	if e.Status != st {
+		t.Fatalf("Status=%d want %d", e.Status, st)
+	}
+	if e.Message != http.StatusText(st) {
+		t.Fatalf("Message=%q want %q", e.Message, http.StatusText(st))
+	}
+	if e.Reason != "unhandled error format" {
+		t.Fatalf("Reason=%q want %q", e.Reason, "unhandled error format")
+	}
+	if e.Raw != `["oops"]` {
+		t.Fatalf("Raw=%q want %q", e.Raw, `["oops"]`)
+	}
+	if e.Details != nil {
+		t.Fatalf("Details=%#v want nil for non-object JSON", e.Details)
+	}
+}
+
 func TestParse_TopLevelShape(t *testing.T) {
 	body := []byte(`{"message":"oops","statusCode":400,"error":"Bad Request","extra":"x"}`)
 	st := http.StatusBadRequest
@@ -74,6 +97,20 @@ func TestParse_TopLevelShape(t *testing.T) {
 	}
 }
 
+func TestParse_TopLevelStatusCodeWithoutMessage_FallsBack(t *testing.T) {
+	body := []byte(`{"statusCode":400,"error":"Bad Request"}`)
+	st := http.StatusBadRequest
+
+	e := apierr.Parse(body, st)
+
+	if e.Message != http.StatusText(st) {
+		t.Fatalf("Message=%q want %q", e.Message, http.StatusText(st))
+	}
+	if e.Reason != "Bad Request" {
+		t.Fatalf("Reason=%q want %q", e.Reason, "Bad Request")
+	}
+}
+
 func TestParse_NestedError_WithDetails(t *testing.T) {
 	body := []byte(`{"error":{"message":"nope","code":422,"details":{"foo":"bar"}}}`)
 	st := 422
@@ -90,6 +127,31 @@ func TestParse_NestedError_WithDetails(t *testing.T) {
 	}
 	if e.Details == nil || e.Details["foo"] != "bar" {
 		t.Fatalf("Details=%#v want foo=bar", e.Details)
+	}
+}
+
+func TestParse_NestedError_NoMessage_UsesStatusText(t *testing.T) {
+	body := []byte(`{"error":{"code":500,"details":{"x":1}}}`)
+	st := http.StatusInternalServerError
+
+	e := apierr.Parse(body, st)
+
+	if e.Message != http.StatusText(st) {
+		t.Fatalf("Message=%q want %q", e.Message, http.StatusText(st))
+	}
+	if e.Code != 500 {
+		t.Fatalf("Code=%d want 500", e.Code)
+	}
+}
+
+func TestParse_NestedError_NoDetails_GetsDefaultReasonMap(t *testing.T) {
+	body := []byte(`{"error":{"message":"boom","code":500}}`)
+	st := http.StatusInternalServerError
+
+	e := apierr.Parse(body, st)
+
+	if e.Details == nil || e.Details["reason"] != "server error without details" {
+		t.Fatalf("Details=%#v want default reason map", e.Details)
 	}
 }
 
@@ -154,6 +216,54 @@ func TestParse_AltTopLevel_ErrorCode(t *testing.T) {
 	}
 }
 
+func TestParse_AltTopLevel_InvalidCode_UsesErrorCode(t *testing.T) {
+	body := []byte(`{"message":"kaput","code":"NaN","errorCode":"4711"}`)
+	st := http.StatusBadRequest
+
+	e := apierr.Parse(body, st)
+
+	if e.Code != 4711 {
+		t.Fatalf("Code=%d want 4711", e.Code)
+	}
+	if e.Message != "kaput" {
+		t.Fatalf("Message=%q want %q", e.Message, "kaput")
+	}
+}
+
+func TestParse_AltTopLevel_DetailsScalar_Wrapped(t *testing.T) {
+	body := []byte(`{"message":"bad","code":429,"details":"slow down"}`)
+	st := http.StatusTooManyRequests
+
+	e := apierr.Parse(body, st)
+
+	if e.Code != 429 {
+		t.Fatalf("Code=%d want 429", e.Code)
+	}
+	if e.Details == nil || e.Details["details"] != "slow down" {
+		t.Fatalf("Details=%#v want wrapped scalar details", e.Details)
+	}
+}
+
+func TestParse_TopLevelShape_ErrorNotString_FallsBack(t *testing.T) {
+	body := []byte(`{"message":"oops","statusCode":400,"error":123}`)
+	st := http.StatusBadRequest
+
+	e := apierr.Parse(body, st)
+
+	if e.Status != st {
+		t.Fatalf("Status=%d want %d", e.Status, st)
+	}
+	if e.Code != 0 {
+		t.Fatalf("Code=%d want 0", e.Code)
+	}
+	if e.Message != "oops" {
+		t.Fatalf("Message=%q want %q", e.Message, "oops")
+	}
+	if e.Reason != "unhandled error format" {
+		t.Fatalf("Reason=%q want %q", e.Reason, "unhandled error format")
+	}
+}
+
 func TestParse_FallbackUnhandled_UsesStatusText(t *testing.T) {
 	body := []byte(`{"foo":"bar"}`)
 	st := 418 // I'm a teapot
@@ -167,6 +277,23 @@ func TestParse_FallbackUnhandled_UsesStatusText(t *testing.T) {
 	}
 	if e.Reason != "unhandled error format" {
 		t.Fatalf("Reason=%q want %q", e.Reason, "unhandled error format")
+	}
+	if e.Details == nil || e.Details["foo"] != "bar" {
+		t.Fatalf("Details=%#v want foo=bar", e.Details)
+	}
+}
+
+func TestParse_Fallback_UsesMessageAndStringError(t *testing.T) {
+	body := []byte(`{"message":"custom boom","error":"proxy unhappy","foo":"bar"}`)
+	st := http.StatusBadGateway
+
+	e := apierr.Parse(body, st)
+
+	if e.Message != "custom boom" {
+		t.Fatalf("Message=%q want %q", e.Message, "custom boom")
+	}
+	if e.Reason != "proxy unhappy" {
+		t.Fatalf("Reason=%q want %q", e.Reason, "proxy unhappy")
 	}
 	if e.Details == nil || e.Details["foo"] != "bar" {
 		t.Fatalf("Details=%#v want foo=bar", e.Details)
