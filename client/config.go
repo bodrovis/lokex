@@ -15,10 +15,6 @@ const (
 	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
 	defaultUserAgent = "lokex/2.0.0"
 
-	// defaultErrCap caps how many bytes we slurp from a non-2xx response when
-	// constructing an apierr.APIError.
-	defaultErrCap = 8192
-
 	// defaults for retry/backoff and HTTP timeouts.
 	defaultMaxRetries     = 3
 	defaultInitialBackoff = 400 * time.Millisecond
@@ -96,7 +92,7 @@ func WithHTTPTimeout(d time.Duration) Option {
 }
 
 // WithMaxRetries sets how many *retries* to attempt after the initial try.
-// Use 0 (or negative) to disable retries entirely.
+// Zero disables retries; negative values are normalized to zero.
 func WithMaxRetries(n int) Option {
 	return func(c *Client) error {
 		if n < 0 {
@@ -141,6 +137,7 @@ func WithPollWait(initial, max time.Duration) Option {
 		if max < initial {
 			max = initial
 		}
+
 		c.PollInitialWait = initial
 		c.PollMaxWait = max
 		return nil
