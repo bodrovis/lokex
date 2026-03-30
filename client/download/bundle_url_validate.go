@@ -1,4 +1,4 @@
-package client
+package download
 
 import (
 	"fmt"
@@ -57,13 +57,19 @@ func validateBundleURL(raw string) (string, error) {
 		}
 	}
 
-	// Normalize (drops weird stuff like empty path normalization).
+	// Return the parsed URL as normalized by net/url serialization.
 	return u.String(), nil
 }
 
 func isBlockedIP(ip net.IP) bool {
-	ip = normalizeIP(ip)
 	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	} else if v6 := ip.To16(); v6 != nil {
+		ip = v6
+	} else {
 		return true
 	}
 
@@ -82,16 +88,6 @@ func isBlockedIP(ip net.IP) bool {
 		}
 	}
 	return false
-}
-
-func normalizeIP(ip net.IP) net.IP {
-	if v4 := ip.To4(); v4 != nil {
-		return v4
-	}
-	if v6 := ip.To16(); v6 != nil {
-		return v6
-	}
-	return nil
 }
 
 var blockedNets = []*net.IPNet{

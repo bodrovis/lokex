@@ -1,4 +1,4 @@
-package client_test
+package upload_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,8 +17,23 @@ import (
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
+	"github.com/bodrovis/lokex/v2/client/upload"
+	"github.com/bodrovis/lokex/v2/internal/testutils"
 	"github.com/jarcoal/httpmock"
 )
+
+var (
+	token     string
+	projectID string
+)
+
+func init() {
+	if err := testutils.LoadDotEnv(); err != nil {
+		log.Printf("warning: could not load .env: %v", err)
+	}
+	token = testutils.GetEnv("LOKALISE_API_TOKEN", "secret")
+	projectID = testutils.GetEnv("LOKALISE_PROJECT_ID", "123.abc")
+}
 
 func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 	httpmock.Activate()
@@ -75,7 +91,7 @@ func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	// Prepare temp JSON file
 	dir := t.TempDir()
@@ -84,7 +100,7 @@ func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	params := client.UploadParams{
+	params := upload.UploadParams{
 		"filename": fp, // preserved
 		"lang_iso": "en",
 	}
@@ -129,7 +145,7 @@ func TestUploader_Upload_NoPoll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	// temp file
 	dir := t.TempDir()
@@ -138,7 +154,7 @@ func TestUploader_Upload_NoPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	params := client.UploadParams{
+	params := upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}
@@ -181,7 +197,7 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 	}`))
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "payload.json")
@@ -189,7 +205,7 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	params := client.UploadParams{
+	params := upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 		"data":     "dGVzdA==", // "test"
@@ -221,7 +237,7 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 	}`))
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "x.json")
@@ -229,7 +245,7 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	params := client.UploadParams{
+	params := upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 		"data":     []byte("XYZ"),
@@ -242,9 +258,9 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 
 func TestUploader_Upload_MissingFilename(t *testing.T) {
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"lang_iso": "en",
 	}, "", true)
 	if err == nil || !strings.Contains(err.Error(), "missing 'filename'") {
@@ -254,10 +270,10 @@ func TestUploader_Upload_MissingFilename(t *testing.T) {
 
 func TestUploader_Upload_DirectoryIsError(t *testing.T) {
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir() // directory, not file
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": dir,
 		"lang_iso": "en",
 	}, "", true)
@@ -281,7 +297,7 @@ func TestUploader_Upload_TimeoutWhilePolling(t *testing.T) {
 	}`))
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "en.json")
@@ -292,7 +308,7 @@ func TestUploader_Upload_TimeoutWhilePolling(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	_, err := u.Upload(ctx, client.UploadParams{
+	_, err := u.Upload(ctx, upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", true)
@@ -317,13 +333,13 @@ func TestUploader_Upload_SetsAcceptHeader_AndContentType(t *testing.T) {
 	})
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "en.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	if _, err := u.Upload(context.Background(), client.UploadParams{
+	if _, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp, "lang_iso": "en",
 	}, "", false); err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -332,13 +348,13 @@ func TestUploader_Upload_SetsAcceptHeader_AndContentType(t *testing.T) {
 
 func TestUploader_Upload_RejectsWeirdDataType(t *testing.T) {
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "file.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp, "lang_iso": "en", "data": 12345, // not string/[]byte
 	}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "'data' must be string or []byte") {
@@ -348,10 +364,10 @@ func TestUploader_Upload_RejectsWeirdDataType(t *testing.T) {
 
 func TestUploader_Upload_ReadFileError(t *testing.T) {
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	// file path that doesn't exist
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": filepath.Join(t.TempDir(), "nope.json"),
 		"lang_iso": "en",
 	}, "", false)
@@ -370,13 +386,13 @@ func TestUploader_Upload_EmptyProcessID_NoPoll_NoError(t *testing.T) {
 	)
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "en.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	processID, err := u.Upload(context.Background(), client.UploadParams{
+	processID, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", false)
@@ -398,13 +414,13 @@ func TestUploader_Upload_EmptyProcessID_WithPoll_Error(t *testing.T) {
 	)
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "en.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", true)
@@ -425,13 +441,13 @@ func TestUploader_Upload_Allows204EmptyBody_ButErrorsOnMissingProcess(t *testing
 	httpmock.RegisterResponder("POST", targetPost, httpmock.NewStringResponder(204, ""))
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "en.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp, "lang_iso": "en",
 	}, "", true)
 	if err == nil || !strings.Contains(err.Error(), "no process id returned") {
@@ -459,13 +475,13 @@ func TestUploader_Upload_RetriesOn5xxThenSucceeds(t *testing.T) {
 	}`))
 
 	cli, _ := client.NewClient(token, projectID, client.WithBackoff(1*time.Millisecond, 5*time.Millisecond))
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	if _, err := u.Upload(context.Background(), client.UploadParams{
+	if _, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp, "lang_iso": "en",
 	}, "", true); err != nil {
 		t.Fatalf("unexpected: %v", err)
@@ -485,13 +501,13 @@ func TestUploader_Upload_DoesNotRetryOn4xx(t *testing.T) {
 	httpmock.RegisterResponder("POST", urlPost, httpmock.NewStringResponder(400, `{"error":{"message":"bad"}}`))
 
 	cli, _ := client.NewClient(token, projectID, client.WithBackoff(1*time.Millisecond, 5*time.Millisecond))
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp, "lang_iso": "en",
 	}, "", false)
 	if err == nil {
@@ -512,56 +528,17 @@ func TestUploader_Upload_DecodeErrorBubbles(t *testing.T) {
 		httpmock.NewStringResponder(200, `{"process":{"process_id":`),
 	)
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp, "lang_iso": "en",
 	}, "", false)
 	if err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("want decode response error, got %v", err)
-	}
-}
-
-func TestIntegration_Upload(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in -short mode")
-	}
-	if token == "secret" || projectID == "123.abc" {
-		t.Skip("no real Lokalise credentials; skipping integration test")
-	}
-
-	cli, err := client.NewClient(token, projectID, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := client.NewUploader(cli)
-
-	// Each test gets its own private directory that Go deletes automatically.
-	dir := t.TempDir()
-
-	// Create the file inside the temp directory.
-	fp := filepath.Join(dir, "en.json")
-	if err := os.WriteFile(fp, []byte(`{"hello":"lokalise"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	// filename -> what Lokalise sees; srcPath -> where we read bytes from.
-	pid, err := u.Upload(ctx, client.UploadParams{
-		"filename": "locales/%LANG_ISO%.json", // demo filename
-		"lang_iso": "en",
-	}, fp, true)
-	if err != nil {
-		t.Fatalf("integration upload failed: %v", err)
-	}
-	if pid == "" {
-		t.Fatalf("expected non-empty process id")
 	}
 }
 
@@ -571,7 +548,7 @@ func TestNewUploader_NilClientPanics(t *testing.T) {
 			t.Fatalf("expected panic, got nil")
 		}
 	}()
-	_ = client.NewUploader(nil)
+	_ = upload.NewUploader(nil)
 }
 
 func TestUploader_Upload_RejectsInvalidBase64String_NoNetwork(t *testing.T) {
@@ -579,13 +556,13 @@ func TestUploader_Upload_RejectsInvalidBase64String_NoNetwork(t *testing.T) {
 	defer httpmock.DeactivateAndReset()
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.json")
 	_ = os.WriteFile(fp, []byte("{}"), 0o644)
 
-	_, err := u.Upload(context.Background(), client.UploadParams{
+	_, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 		"data":     "nope!!!",
@@ -603,7 +580,7 @@ func TestUploader_Upload_RejectsInvalidBase64String_NoNetwork(t *testing.T) {
 
 func TestUploader_Upload_ContextAlreadyCanceled(t *testing.T) {
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.json")
@@ -612,7 +589,7 @@ func TestUploader_Upload_ContextAlreadyCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := u.Upload(ctx, client.UploadParams{
+	_, err := u.Upload(ctx, upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", false)
@@ -639,7 +616,7 @@ func TestUploader_Upload_ContextCancelDuringBodyBuild(t *testing.T) {
 	})
 
 	cli, _ := client.NewClient(token, projectID, nil)
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "f.json")
@@ -649,7 +626,7 @@ func TestUploader_Upload_ContextCancelDuringBodyBuild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 
-	_, err := u.Upload(ctx, client.UploadParams{
+	_, err := u.Upload(ctx, upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 		"data":     huge,
@@ -689,9 +666,9 @@ func TestUploader_Upload_DataProvided_DoesNotNeedLocalFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
-	params := client.UploadParams{
+	params := upload.UploadParams{
 		"filename": "does/not/exist.json",
 		"lang_iso": "en",
 		"data":     "dGVzdA==",
@@ -743,9 +720,9 @@ func TestUploader_Upload_SrcPathOverridesLocalReadPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
-	params := client.UploadParams{
+	params := upload.UploadParams{
 		"filename": "locales/%LANG_ISO%.json",
 		"lang_iso": "en",
 	}
@@ -781,7 +758,7 @@ func TestUploader_Upload_ReadFilePermissionDeniedAfterStat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	u := client.NewUploader(cli)
+	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "no_read.json")
@@ -802,7 +779,7 @@ func TestUploader_Upload_ReadFilePermissionDeniedAfterStat(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	_, err = u.Upload(ctx, client.UploadParams{
+	_, err = u.Upload(ctx, upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", false)

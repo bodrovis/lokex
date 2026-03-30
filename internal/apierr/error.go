@@ -9,6 +9,12 @@ import (
 	"net/http"
 )
 
+const (
+	// defaultErrCap caps how many bytes we slurp from a non-2xx response when
+	// constructing an apierr.APIError.
+	DefaultErrCap = 8192
+)
+
 // APIError represents a non-2xx response from the Lokalise API (or other
 // HTTP services used by lokex). Callers can inspect Status/Code/Details to
 // decide how to handle the error (e.g., retry on 429/5xx as determined by

@@ -1,19 +1,22 @@
-// Package client provides a wrapper around the Lokalise API that the
-// upload/download packages depend on. It handles base URL normalization,
-// authentication, retry with exponential backoff,
-// and simple polling of asynchronous processes.
+// Package client provides shared Lokalise client state and convenience helpers
+// used by higher-level upload, download, and background workflows.
 package client
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/bodrovis/lokex/v2/client/internal/retry"
+	"github.com/bodrovis/lokex/v2/client/internal/transport"
 )
 
-// Client is a minimal Lokalise API client.
-// It is safe for concurrent use after construction (fields are not mutated
-// post-NewClient). The embedded http.Client is used as-is.
+// It is intended to be safe for concurrent use after construction, assuming
+// its fields are not mutated after NewClient returns. The embedded http.Client
+// is used as-is.
 type Client struct {
 	BaseURL         string        // normalized base URL with trailing slash
 	Token           string        // API token (X-Api-Token header)
@@ -21,7 +24,7 @@ type Client struct {
 	UserAgent       string        // User-Agent header value
 	HTTPClient      *http.Client  // underlying HTTP client
 	MaxRetries      int           // number of retries after first attempt
-	InitialBackoff  time.Duration // first backoff duration for withExpBackoff
+	InitialBackoff  time.Duration // initial backoff duration for retries
 	MaxBackoff      time.Duration // cap for backoff (and jittered sleep)
 	PollInitialWait time.Duration // initial wait between PollProcesses rounds
 	PollMaxWait     time.Duration // overall cap for PollProcesses duration
@@ -61,11 +64,59 @@ func NewClient(token, projectID string, opts ...Option) (*Client, error) {
 		}
 	}
 
-	// final normalization (in case WithBaseURL was not used)
-	c.BaseURL = strings.TrimSpace(c.BaseURL)
-	if !strings.HasSuffix(c.BaseURL, "/") {
-		c.BaseURL += "/"
-	}
-
 	return c, nil
+}
+
+// Requester builds a transport requester using the client's current HTTP settings.
+func (c *Client) Requester() transport.Requester {
+	return transport.Requester{
+		BaseURL:    c.BaseURL,
+		Token:      c.Token,
+		UserAgent:  c.UserAgent,
+		HTTPClient: c.HTTPClient,
+	}
+}
+
+// DoJSONWithRetry performs one JSON request using the client's retry policy.
+// If body supports replay (for example via retryBodyFactory or io.ReadSeeker),
+// it may be retried without rebuilding the caller's request manually.
+func (c *Client) DoJSONWithRetry(
+	ctx context.Context,
+	method, path string,
+	body io.Reader,
+	v any,
+) error {
+	reqr := c.Requester()
+	return retry.DoWithRetry(
+		ctx,
+		retry.Config{
+			Label:          "request",
+			MaxRetries:     c.MaxRetries,
+			InitialBackoff: c.InitialBackoff,
+			MaxBackoff:     c.MaxBackoff,
+		},
+		body,
+		func(_ int, b io.Reader) error {
+			return reqr.DoJSON(ctx, method, path, b, v)
+		},
+		nil,
+	)
+}
+
+// WithExpBackoff runs op using the client's retry/backoff settings.
+func (c *Client) WithExpBackoff(
+	ctx context.Context,
+	label string,
+	op func(attempt int) error,
+	isRetryable func(error) bool,
+) error {
+	return retry.WithExpBackoff(
+		ctx,
+		label,
+		c.MaxRetries,
+		c.InitialBackoff,
+		c.MaxBackoff,
+		op,
+		isRetryable,
+	)
 }
