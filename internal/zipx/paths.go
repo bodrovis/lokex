@@ -8,9 +8,17 @@ import (
 	"strings"
 )
 
+var (
+	filepathRelFn      = filepath.Rel
+	lstatFn            = os.Lstat
+	evalSymlinksPathFn = filepath.EvalSymlinks
+	isPathWithinBaseFn = isPathWithinBase
+	absFilepath        = filepath.Abs
+)
+
 // isPathWithinBase checks if absPath (absolute, resolved) is under baseAbs (absolute, resolved)
 func isPathWithinBase(baseAbs, absPath string) bool {
-	rel, err := filepath.Rel(baseAbs, absPath)
+	rel, err := filepathRelFn(baseAbs, absPath)
 	if err != nil {
 		return false
 	}
@@ -51,12 +59,12 @@ func resolveTargetPath(destDir, destReal, rel, originalName string) (string, err
 	}
 
 	targetPath := filepath.Join(destDir, cand)
-	targetAbs, err := filepath.Abs(targetPath)
+	targetAbs, err := absFilepath(targetPath)
 	if err != nil {
 		return "", err
 	}
 
-	if !isPathWithinBase(destReal, targetAbs) {
+	if !isPathWithinBaseFn(destReal, targetAbs) {
 		return "", fmt.Errorf("unsafe path escape: %q", originalName)
 	}
 
@@ -64,7 +72,7 @@ func resolveTargetPath(destDir, destReal, rel, originalName string) (string, err
 }
 
 func pathHasSymlinkOutside(destRoot, file string) (bool, error) {
-	rel, err := filepath.Rel(destRoot, file)
+	rel, err := filepathRelFn(destRoot, file)
 	if err != nil {
 		return true, err
 	}
@@ -74,7 +82,7 @@ func pathHasSymlinkOutside(destRoot, file string) (bool, error) {
 			continue
 		}
 		cur = filepath.Join(cur, seg)
-		fi, err := os.Lstat(cur)
+		fi, err := lstatFn(cur)
 		if err != nil {
 			if os.IsNotExist(err) {
 				continue
@@ -82,7 +90,7 @@ func pathHasSymlinkOutside(destRoot, file string) (bool, error) {
 			return false, err
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
-			real, err := filepath.EvalSymlinks(cur)
+			real, err := evalSymlinksPathFn(cur)
 			if err != nil {
 				return true, err
 			}

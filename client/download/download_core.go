@@ -38,6 +38,12 @@ type DownloadParams map[string]any
 // can share the same pipeline.
 type FetchFunc func(ctx context.Context, body io.Reader) (string, error)
 
+var downloadAndUnzipFn = func(d *Downloader, ctx context.Context, bundleURL, destDir string) error {
+	return d.DownloadAndUnzip(ctx, bundleURL, destDir)
+}
+
+var encodeJSONBody = utils.EncodeJSONBody
+
 // NewDownloader creates a new Downloader bound to c.
 // c must be non-nil; it is used for HTTP, retry/backoff, and polling.
 func NewDownloader(c *client.Client) *Downloader {
@@ -114,7 +120,7 @@ func (d *Downloader) doDownload(
 		body = map[string]any{}
 	}
 
-	rdr, err := utils.EncodeJSONBody(body)
+	rdr, err := encodeJSONBody(body)
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
@@ -124,7 +130,7 @@ func (d *Downloader) doDownload(
 		return "", err
 	}
 
-	if err := d.DownloadAndUnzip(ctx, bundleURL, unzipTo); err != nil {
+	if err := downloadAndUnzipFn(d, ctx, bundleURL, unzipTo); err != nil {
 		return "", err
 	}
 

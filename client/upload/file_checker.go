@@ -7,13 +7,15 @@ import (
 	"strings"
 )
 
+var statFile = os.Stat
+
 // ensureFileIsRegular stats the path and rejects directories / missing files.
 func ensureFileIsRegular(readPath string) error {
 	if strings.TrimSpace(readPath) == "" {
 		return errors.New("upload: empty file path")
 	}
 
-	fi, err := os.Stat(readPath)
+	fi, err := statFile(readPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("upload: file not found: %q: %w", readPath, err)

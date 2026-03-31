@@ -8,6 +8,11 @@ import (
 	"path/filepath"
 )
 
+var (
+	mkdirAllDir             = os.MkdirAll
+	pathHasSymlinkOutsideFn = pathHasSymlinkOutside
+)
+
 func extractEntry(f *zip.File, destDir, destReal string, p Policy) (int64, error) {
 	targetAbs, info, mode, skip, err := prepareEntryTarget(f, destDir, destReal, p)
 	if err != nil || skip {
@@ -62,7 +67,7 @@ func prepareEntryTarget(f *zip.File, destDir, destReal string, p Policy) (target
 }
 
 func extractDirEntry(f *zip.File, targetAbs string, p Policy) error {
-	if err := os.MkdirAll(targetAbs, 0o755); err != nil {
+	if err := mkdirAllDir(targetAbs, 0o755); err != nil {
 		return err
 	}
 	if p.PreserveTimes && !f.Modified.IsZero() {
@@ -72,11 +77,11 @@ func extractDirEntry(f *zip.File, targetAbs string, p Policy) error {
 }
 
 func prepareParentDir(targetAbs string) error {
-	return os.MkdirAll(filepath.Dir(targetAbs), 0o755)
+	return mkdirAllDir(filepath.Dir(targetAbs), 0o755)
 }
 
 func checkParentSymlinks(destReal, targetAbs, entryName string) error {
-	if bad, derr := pathHasSymlinkOutside(destReal, targetAbs); derr == nil && bad {
+	if bad, derr := pathHasSymlinkOutsideFn(destReal, targetAbs); derr == nil && bad {
 		return fmt.Errorf("unsafe symlink in parents for: %q", entryName)
 	} else if derr != nil && !os.IsNotExist(derr) {
 		return derr

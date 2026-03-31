@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 )
+
+var openFile = func(name string) (io.ReadCloser, error) {
+	return os.Open(name)
+}
 
 func writeUploadJSON(w *bufio.Writer, params UploadParams, cleanPath string, spec uploadDataSpec) error {
 	// Start JSON object.
@@ -64,10 +67,9 @@ func writeUploadKV(w *bufio.Writer, k string, v any, first *bool) error {
 		*first = false
 	}
 
-	kb, err := json.Marshal(k)
-	if err != nil {
-		return err
-	}
+	// json.Marshal(string) cannot fail
+	kb, _ := json.Marshal(k)
+
 	vb, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -98,7 +100,7 @@ func writeUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) err
 
 	switch {
 	case spec.useFile:
-		f, err := os.Open(cleanPath)
+		f, err := openFile(cleanPath)
 		if err != nil {
 			return err
 		}
@@ -107,9 +109,6 @@ func writeUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) err
 
 	case spec.dataWasBytes:
 		r = bytes.NewReader(spec.dataBytes)
-
-	default:
-		return fmt.Errorf("upload: invalid data spec")
 	}
 
 	enc := base64.NewEncoder(base64.StdEncoding, w)

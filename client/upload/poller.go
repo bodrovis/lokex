@@ -6,9 +6,18 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bodrovis/lokex/v2/client"
 	"github.com/bodrovis/lokex/v2/client/internal/background"
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
+
+var pollProcessesFn = func(
+	ctx context.Context,
+	processIDs []string,
+	c *client.Client,
+) ([]background.QueuedProcess, error) {
+	return background.PollProcesses(ctx, processIDs, c)
+}
 
 // pollUntilFinished polls a single process until it reaches a terminal status.
 // It returns the process ID on "finished" and an error otherwise.
@@ -18,7 +27,7 @@ func (u *Uploader) pollUntilFinished(ctx context.Context, processID string) (str
 		return "", errors.New("upload: empty process_id")
 	}
 
-	results, err := background.PollProcesses(ctx, []string{processID}, u.client)
+	results, err := pollProcessesFn(ctx, []string{processID}, u.client)
 	if err != nil {
 		return "", fmt.Errorf("upload: poll processes: %w", err)
 	}

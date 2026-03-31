@@ -10,7 +10,7 @@ import (
 // Validate checks that zipPath is a readable ZIP file.
 // Returns io.ErrUnexpectedEOF if it is not.
 func Validate(zipPath string) (err error) {
-	zr, err := zip.OpenReader(zipPath)
+	zr, err := openZipReader(zipPath)
 	if err != nil {
 		if errors.Is(err, zip.ErrFormat) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return fmt.Errorf("zip validate: %w", io.ErrUnexpectedEOF)

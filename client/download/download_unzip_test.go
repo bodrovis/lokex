@@ -470,3 +470,212 @@ func TestDownloadAndUnzip_ContextAlreadyCanceled_NoRequest(t *testing.T) {
 		t.Fatalf("GET attempts = %d, want 0", got)
 	}
 }
+
+func TestDownloadAndUnzipPrecheck(t *testing.T) {
+	t.Run("nil downloader", func(t *testing.T) {
+		t.Parallel()
+
+		var d *download.Downloader
+
+		gotCtx, gotURL, gotDest, err := download.ExportDownloadAndUnzipPrecheck(
+			d,
+			context.Background(),
+			"https://example.com/bundle.zip",
+			t.TempDir(),
+		)
+		if err == nil {
+			t.Fatal("DownloadAndUnzipPrecheck() error = nil, want non-nil")
+		}
+		if err.Error() != "download: downloader/client/http client is nil" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: downloader/client/http client is nil")
+		}
+		if gotCtx != nil {
+			t.Fatal("context != nil, want nil on error")
+		}
+		if gotURL != "" {
+			t.Fatalf("url = %q, want empty string on error", gotURL)
+		}
+		if gotDest != "" {
+			t.Fatalf("dest = %q, want empty string on error", gotDest)
+		}
+	})
+
+	t.Run("nil client", func(t *testing.T) {
+		t.Parallel()
+
+		d := download.ExportNewDownloaderWithClientForTest(nil)
+
+		gotCtx, gotURL, gotDest, err := download.ExportDownloadAndUnzipPrecheck(
+			d,
+			context.Background(),
+			"https://example.com/bundle.zip",
+			t.TempDir(),
+		)
+		if err == nil {
+			t.Fatal("DownloadAndUnzipPrecheck() error = nil, want non-nil")
+		}
+		if err.Error() != "download: downloader/client/http client is nil" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: downloader/client/http client is nil")
+		}
+		if gotCtx != nil {
+			t.Fatal("context != nil, want nil on error")
+		}
+		if gotURL != "" {
+			t.Fatalf("url = %q, want empty string on error", gotURL)
+		}
+		if gotDest != "" {
+			t.Fatalf("dest = %q, want empty string on error", gotDest)
+		}
+	})
+
+	t.Run("nil http client", func(t *testing.T) {
+		t.Parallel()
+
+		d := download.ExportNewDownloaderWithClientForTest(&client.Client{
+			HTTPClient: nil,
+			ProjectID:  projectID,
+		})
+
+		gotCtx, gotURL, gotDest, err := download.ExportDownloadAndUnzipPrecheck(
+			d,
+			context.Background(),
+			"https://example.com/bundle.zip",
+			t.TempDir(),
+		)
+		if err == nil {
+			t.Fatal("DownloadAndUnzipPrecheck() error = nil, want non-nil")
+		}
+		if err.Error() != "download: downloader/client/http client is nil" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: downloader/client/http client is nil")
+		}
+		if gotCtx != nil {
+			t.Fatal("context != nil, want nil on error")
+		}
+		if gotURL != "" {
+			t.Fatalf("url = %q, want empty string on error", gotURL)
+		}
+		if gotDest != "" {
+			t.Fatalf("dest = %q, want empty string on error", gotDest)
+		}
+	})
+
+	t.Run("nil context uses background", func(t *testing.T) {
+		t.Parallel()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+		destDir := t.TempDir()
+
+		gotCtx, gotURL, gotDest, err := download.ExportDownloadAndUnzipPrecheck(
+			d,
+			nil,
+			"  https://example.com/bundle.zip  ",
+			"  "+destDir+"  ",
+		)
+		if err != nil {
+			t.Fatalf("DownloadAndUnzipPrecheck() unexpected error = %v", err)
+		}
+		if gotCtx == nil {
+			t.Fatal("context = nil, want non-nil")
+		}
+		if gotCtx.Err() != nil {
+			t.Fatalf("context error = %v, want nil", gotCtx.Err())
+		}
+		if gotURL != "https://example.com/bundle.zip" {
+			t.Fatalf("url = %q, want %q", gotURL, "https://example.com/bundle.zip")
+		}
+		if gotDest != destDir {
+			t.Fatalf("dest = %q, want %q", gotDest, destDir)
+		}
+	})
+}
+
+func TestEnsureDestDir(t *testing.T) {
+	t.Run("mkdir all error is wrapped", func(t *testing.T) {
+		restore := download.ExportSetMkdirAllForTest(func(path string, perm os.FileMode) error {
+			return errors.New("mkdir boom")
+		})
+		defer restore()
+
+		err := download.ExportEnsureDestDir("/nope")
+		if err == nil {
+			t.Fatal("EnsureDestDir() error = nil, want non-nil")
+		}
+		if err.Error() != "download: create dest: mkdir boom" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: create dest: mkdir boom")
+		}
+	})
+}
+
+func TestCreateDownloadTempDir(t *testing.T) {
+	t.Run("mkdir temp error is wrapped", func(t *testing.T) {
+		restore := download.ExportSetMkdirTempForTest(func(dir, pattern string) (string, error) {
+			return "", errors.New("mktemp boom")
+		})
+		defer restore()
+
+		tmpDir, cleanup, err := download.ExportCreateDownloadTempDir()
+		if err == nil {
+			t.Fatal("CreateDownloadTempDir() error = nil, want non-nil")
+		}
+		if err.Error() != "download: create temp dir: mktemp boom" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: create temp dir: mktemp boom")
+		}
+		if tmpDir != "" {
+			t.Fatalf("tmpDir = %q, want empty string on error", tmpDir)
+		}
+		if cleanup != nil {
+			t.Fatal("cleanup != nil, want nil on error")
+		}
+	})
+}
+
+func TestDownloadAndUnzip(t *testing.T) {
+	t.Run("ensure dest dir error is returned", func(t *testing.T) {
+		restore := download.ExportSetMkdirAllForTest(func(path string, perm os.FileMode) error {
+			return errors.New("mkdir boom")
+		})
+		defer restore()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		err = d.DownloadAndUnzip(context.Background(), "https://example.com/bundle.zip", t.TempDir())
+		if err == nil {
+			t.Fatal("DownloadAndUnzip() error = nil, want non-nil")
+		}
+		if err.Error() != "download: create dest: mkdir boom" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: create dest: mkdir boom")
+		}
+	})
+
+	t.Run("create temp dir error is returned", func(t *testing.T) {
+		restore := download.ExportSetMkdirTempForTest(func(dir, pattern string) (string, error) {
+			return "", errors.New("mktemp boom")
+		})
+		defer restore()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		err = d.DownloadAndUnzip(context.Background(), "https://example.com/bundle.zip", t.TempDir())
+		if err == nil {
+			t.Fatal("DownloadAndUnzip() error = nil, want non-nil")
+		}
+		if err.Error() != "download: create temp dir: mktemp boom" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: create temp dir: mktemp boom")
+		}
+	})
+}

@@ -71,7 +71,6 @@ func TestLoadDotEnv_LoadsFromProjectRootWhenMissingInCWD(t *testing.T) {
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 
-	// marker so ProjectRoot() finds root
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(go.mod) error = %v", err)
 	}
@@ -81,7 +80,14 @@ func TestLoadDotEnv_LoadsFromProjectRootWhenMissingInCWD(t *testing.T) {
 		t.Fatalf("WriteFile(.env) error = %v", err)
 	}
 
-	t.Chdir(nested)
+	testutils.TestOnlyResetProjectRootCache()
+	testutils.TestOnlySetGetwd(func() (string, error) {
+		return nested, nil
+	})
+	t.Cleanup(func() {
+		testutils.TestOnlySetGetwd(os.Getwd)
+		testutils.TestOnlyResetProjectRootCache()
+	})
 
 	t.Setenv(key, "")
 	if err := os.Unsetenv(key); err != nil {

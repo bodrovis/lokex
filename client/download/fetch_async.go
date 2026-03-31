@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/bodrovis/lokex/v2/client"
 	"github.com/bodrovis/lokex/v2/client/internal/background"
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
@@ -17,23 +18,62 @@ type AsyncDownloadResponse struct {
 	ProcessID string `json:"process_id"`
 }
 
+var pollProcessesFn = func(
+	ctx context.Context,
+	processIDs []string,
+	c *client.Client,
+) ([]background.QueuedProcess, error) {
+	return background.PollProcesses(ctx, processIDs, c)
+}
+
+func ExportSetPollProcessesForTest(
+	fn func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error),
+) func() {
+	prev := pollProcessesFn
+	pollProcessesFn = fn
+	return func() {
+		pollProcessesFn = prev
+	}
+}
+
 // FetchBundleAsync kicks off an async export (POST /files/async-download) and polls
 // until the process yields a terminal status. On success it returns download_url.
 func (d *Downloader) FetchBundleAsync(ctx context.Context, body io.Reader) (string, error) {
+	ctx, err := d.fetchBundleAsyncPrecheck(ctx, body)
+	if err != nil {
+		return "", err
+	}
+
+	pid, err := d.startAsyncDownload(ctx, body)
+	if err != nil {
+		return "", err
+	}
+
+	p, err := d.pollAsyncDownloadProcess(ctx, pid)
+	if err != nil {
+		return "", err
+	}
+
+	return interpretAsyncDownloadProcess(p)
+}
+
+func (d *Downloader) fetchBundleAsyncPrecheck(ctx context.Context, body io.Reader) (context.Context, error) {
 	if d == nil || d.client == nil {
-		return "", fmt.Errorf("fetch bundle async: nil downloader/client")
+		return nil, fmt.Errorf("fetch bundle async: nil downloader/client")
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("fetch bundle async: context: %w", err)
+		return nil, fmt.Errorf("fetch bundle async: context: %w", err)
 	}
 	if body == nil {
-		return "", fmt.Errorf("fetch bundle async: nil request body")
+		return nil, fmt.Errorf("fetch bundle async: nil request body")
 	}
+	return ctx, nil
+}
 
-	// 1) Kick off async export -> get process_id.
+func (d *Downloader) startAsyncDownload(ctx context.Context, body io.Reader) (string, error) {
 	var kickoff AsyncDownloadResponse
 	path := utils.ProjectPath(d.client.ProjectID, "files/async-download")
 
@@ -46,41 +86,71 @@ func (d *Downloader) FetchBundleAsync(ctx context.Context, body io.Reader) (stri
 		return "", fmt.Errorf("fetch bundle async: empty process id")
 	}
 
-	// 2) Poll this single process until terminal or ctx/poll budget expires.
-	results, err := background.PollProcesses(ctx, []string{pid}, d.client)
+	return pid, nil
+}
+
+func (d *Downloader) pollAsyncDownloadProcess(ctx context.Context, pid string) (background.QueuedProcess, error) {
+	results, err := pollProcessesFn(ctx, []string{pid}, d.client)
 	if err != nil {
-		return "", fmt.Errorf("fetch bundle async: poll processes: %w", err)
+		return background.QueuedProcess{}, fmt.Errorf("fetch bundle async: poll processes: %w", err)
 	}
 	if len(results) == 0 {
-		return "", fmt.Errorf("fetch bundle async: no process results returned (process_id=%s)", pid)
+		return background.QueuedProcess{}, fmt.Errorf(
+			"fetch bundle async: no process results returned (process_id=%s)",
+			pid,
+		)
 	}
 
-	p := results[0]
+	return results[0], nil
+}
+
+func interpretAsyncDownloadProcess(p background.QueuedProcess) (string, error) {
 	st := utils.NormalizeString(p.Status)
 
-	// 3) Interpret result.
 	switch st {
 	case background.StatusFinished:
-		u := strings.TrimSpace(p.DownloadURL)
-		if u == "" {
-			if msg := strings.TrimSpace(p.Message); msg != "" {
-				return "", fmt.Errorf("fetch bundle async: process %s finished but download_url is empty: %s", p.ProcessID, msg)
-			}
-			return "", fmt.Errorf("fetch bundle async: process %s finished but download_url is empty", p.ProcessID)
-		}
-
-		return u, nil
+		return finishedAsyncDownloadURL(p)
 
 	case background.StatusFailed:
-		msg := strings.TrimSpace(p.Message)
-		if msg != "" {
-			return "", fmt.Errorf("fetch bundle async: process %s failed: %s", p.ProcessID, msg)
-		}
-		return "", fmt.Errorf("fetch bundle async: process %s failed", p.ProcessID)
+		return "", failedAsyncDownloadErr(p)
 
 	default:
 		// Usually means we ran out of polling budget (PollMaxWait) but ctx might still be alive,
 		// or Lokalise is slow and never reached terminal before our poll deadline.
-		return "", fmt.Errorf("fetch bundle async: process %s did not finish (status=%q)", p.ProcessID, st)
+		return "", fmt.Errorf(
+			"fetch bundle async: process %s did not finish (status=%q)",
+			p.ProcessID,
+			st,
+		)
 	}
+}
+
+func finishedAsyncDownloadURL(p background.QueuedProcess) (string, error) {
+	u := strings.TrimSpace(p.DownloadURL)
+	if u != "" {
+		return u, nil
+	}
+
+	msg := strings.TrimSpace(p.Message)
+	if msg != "" {
+		return "", fmt.Errorf(
+			"fetch bundle async: process %s finished but download_url is empty: %s",
+			p.ProcessID,
+			msg,
+		)
+	}
+
+	return "", fmt.Errorf(
+		"fetch bundle async: process %s finished but download_url is empty",
+		p.ProcessID,
+	)
+}
+
+func failedAsyncDownloadErr(p background.QueuedProcess) error {
+	msg := strings.TrimSpace(p.Message)
+	if msg != "" {
+		return fmt.Errorf("fetch bundle async: process %s failed: %s", p.ProcessID, msg)
+	}
+
+	return fmt.Errorf("fetch bundle async: process %s failed", p.ProcessID)
 }

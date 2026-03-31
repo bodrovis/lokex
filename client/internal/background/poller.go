@@ -21,6 +21,13 @@ type pollResult struct {
 	err  error
 }
 
+var (
+	pollRoundFn     = pollRound
+	newTimer        = time.NewTimer
+	sleepWithTimer  = utils.SleepWithTimer
+	nextSleepWaitFn = nextSleepWait
+)
+
 // PollProcesses polls one or more Lokalise async process IDs until each reaches a
 // terminal status ("finished" or "failed"), or until the overall polling budget
 // (PollMaxWait) is exhausted.
@@ -47,14 +54,7 @@ func PollProcesses(ctx context.Context, processIDs []string, c *client.Client) (
 		ctx = context.Background()
 	}
 
-	wait, maxWait := c.PollInitialWait, c.PollMaxWait
-
-	deadline := time.Now().Add(maxWait)
-
-	// pollCtx enforces the polling budget (PollMaxWait). When it expires,
-	// we should stop polling and return best-effort results (not an error),
-	// unless the caller's ctx itself is canceled/deadline-exceeded.
-	pollCtx, cancel := context.WithDeadline(ctx, deadline)
+	wait, deadline, pollCtx, cancel := newPollContext(ctx, c)
 	defer cancel()
 
 	ordered, processMap, pending := normalizeProcessIDs(processIDs)
@@ -66,31 +66,24 @@ func PollProcesses(ctx context.Context, processIDs []string, c *client.Client) (
 	const maxConcurrent = 6
 
 	// Reuse a timer to avoid allocating time.After() on each round.
-	timer := time.NewTimer(time.Hour)
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
+	timer := newStoppedTimer()
 	defer timer.Stop()
 
 	for len(pending) > 0 {
-		// Caller cancellation/deadline is a hard stop (real error).
-		if err := ctx.Err(); err != nil {
+		if err := callerContextErr(ctx); err != nil {
 			return nil, err
 		}
 
 		// Poll budget expired: stop polling and return what we have.
-		if pollCtx.Err() != nil {
+		if pollBudgetExpired(pollCtx) {
 			break
 		}
 
 		// One round: fetch all pending statuses concurrently (bounded).
-		procs, errs := pollRound(pollCtx, c, pending, maxConcurrent)
+		procs, errs := pollRoundFn(pollCtx, c, pending, maxConcurrent)
 
 		// If caller ctx died during the round, surface that (real error).
-		if err := ctx.Err(); err != nil {
+		if err := callerContextErr(ctx); err != nil {
 			return nil, err
 		}
 
@@ -102,37 +95,100 @@ func PollProcesses(ctx context.Context, processIDs []string, c *client.Client) (
 		}
 
 		// If budget expired during the round, stop now (best-effort return).
-		if pollCtx.Err() != nil {
+		if pollBudgetExpired(pollCtx) {
 			break
 		}
 
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
+		sleep, ok := nextSleepWaitFn(wait, deadline)
+		if !ok {
 			break
 		}
 
-		sleep := min(wait, remaining)
-		if sleep <= 0 {
-			sleep = 10 * time.Millisecond
+		stopped, err := sleepBetweenPollRounds(ctx, pollCtx, timer, sleep)
+		if err != nil {
+			return nil, err
 		}
-
-		if err := utils.SleepWithTimer(pollCtx, timer, sleep); err != nil {
-			// If caller ctx is canceled/deadline-exceeded -> error.
-			if cerr := ctx.Err(); cerr != nil {
-				return nil, cerr
-			}
-			// Otherwise it's our polling budget -> best-effort return.
+		if stopped {
 			break
 		}
 
 		// Exponential backoff for next round, clipped to remaining budget.
-		remaining = time.Until(deadline)
-		next := min(wait*2, remaining)
-		if next <= 0 {
-			next = 10 * time.Millisecond
-		}
-		wait = next
+		wait = nextPollWait(wait, deadline)
 	}
 
 	return buildResults(ordered, processMap), nil
+}
+
+func newPollContext(ctx context.Context, c *client.Client) (time.Duration, time.Time, context.Context, context.CancelFunc) {
+	wait := c.PollInitialWait
+	maxWait := c.PollMaxWait
+	deadline := time.Now().Add(maxWait)
+
+	// pollCtx enforces the polling budget (PollMaxWait). When it expires,
+	// we should stop polling and return best-effort results (not an error),
+	// unless the caller's ctx itself is canceled/deadline-exceeded.
+	pollCtx, cancel := context.WithDeadline(ctx, deadline)
+
+	return wait, deadline, pollCtx, cancel
+}
+
+func newStoppedTimer() *time.Timer {
+	timer := newTimer(time.Hour)
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	return timer
+}
+
+func callerContextErr(ctx context.Context) error {
+	// Caller cancellation/deadline is a hard stop (real error).
+	return ctx.Err()
+}
+
+func pollBudgetExpired(pollCtx context.Context) bool {
+	return pollCtx.Err() != nil
+}
+
+func nextSleepWait(wait time.Duration, deadline time.Time) (time.Duration, bool) {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, false
+	}
+
+	sleep := min(wait, remaining)
+	if sleep <= 0 {
+		sleep = 10 * time.Millisecond
+	}
+
+	return sleep, true
+}
+
+func sleepBetweenPollRounds(
+	ctx context.Context,
+	pollCtx context.Context,
+	timer *time.Timer,
+	sleep time.Duration,
+) (bool, error) {
+	if err := sleepWithTimer(pollCtx, timer, sleep); err != nil {
+		// If caller ctx is canceled/deadline-exceeded -> error.
+		if cerr := ctx.Err(); cerr != nil {
+			return false, cerr
+		}
+		// Otherwise it's our polling budget -> best-effort return.
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func nextPollWait(wait time.Duration, deadline time.Time) time.Duration {
+	remaining := time.Until(deadline)
+	next := min(wait*2, remaining)
+	if next <= 0 {
+		next = 10 * time.Millisecond
+	}
+	return next
 }

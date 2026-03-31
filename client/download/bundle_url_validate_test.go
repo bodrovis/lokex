@@ -1,6 +1,7 @@
 package download_test
 
 import (
+	"net"
 	"strings"
 	"testing"
 
@@ -224,4 +225,114 @@ func TestValidateBundleURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsBlockedIP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ip   net.IP
+		want bool
+	}{
+		{
+			name: "nil ip is blocked",
+			ip:   nil,
+			want: true,
+		},
+		{
+			name: "invalid ip representation is blocked",
+			ip:   net.IP{1, 2, 3},
+			want: true,
+		},
+		{
+			name: "public ipv4 is allowed",
+			ip:   net.ParseIP("8.8.8.8"),
+			want: false,
+		},
+		{
+			name: "public ipv6 is allowed",
+			ip:   net.ParseIP("2001:4860:4860::8888"),
+			want: false,
+		},
+		{
+			name: "private ipv4 is blocked",
+			ip:   net.ParseIP("10.1.2.3"),
+			want: true,
+		},
+		{
+			name: "loopback ipv4 is blocked",
+			ip:   net.ParseIP("127.0.0.1"),
+			want: true,
+		},
+		{
+			name: "link local ipv4 is blocked",
+			ip:   net.ParseIP("169.254.10.20"),
+			want: true,
+		},
+		{
+			name: "loopback ipv6 is blocked",
+			ip:   net.ParseIP("::1"),
+			want: true,
+		},
+		{
+			name: "link local ipv6 is blocked",
+			ip:   net.ParseIP("fe80::1"),
+			want: true,
+		},
+		{
+			name: "unique local ipv6 is blocked",
+			ip:   net.ParseIP("fc00::1"),
+			want: true,
+		},
+		{
+			name: "multicast ipv6 is blocked",
+			ip:   net.ParseIP("ff00::1"),
+			want: true,
+		},
+		{
+			name: "unspecified ipv6 is blocked",
+			ip:   net.ParseIP("::"),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := download.ExportIsBlockedIP(tt.ip)
+			if got != tt.want {
+				t.Fatalf("IsBlockedIP(%v) = %v, want %v", tt.ip, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMustCIDR(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid cidr", func(t *testing.T) {
+		t.Parallel()
+
+		got := download.ExportMustCIDR("10.0.0.0/8")
+		if got == nil {
+			t.Fatal("MustCIDR() = nil, want non-nil")
+		}
+		if got.String() != "10.0.0.0/8" {
+			t.Fatalf("MustCIDR() = %q, want %q", got.String(), "10.0.0.0/8")
+		}
+	})
+
+	t.Run("invalid cidr panics", func(t *testing.T) {
+		t.Parallel()
+
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("MustCIDR() panic = nil, want non-nil panic")
+			}
+		}()
+
+		_ = download.ExportMustCIDR("definitely-not-a-cidr")
+	})
 }

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,90 @@ import (
 	"github.com/bodrovis/lokex/v2/internal/apierr"
 	"github.com/jarcoal/httpmock"
 )
+
+func TestFetchBundle(t *testing.T) {
+	t.Run("nil downloader", func(t *testing.T) {
+		t.Parallel()
+
+		var d *download.Downloader
+
+		got, err := d.FetchBundle(context.Background(), strings.NewReader(`{}`))
+		if err == nil {
+			t.Fatal("FetchBundle() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle: nil downloader/client" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle: nil downloader/client")
+		}
+		if got != "" {
+			t.Fatalf("got = %q, want empty string on error", got)
+		}
+	})
+
+	t.Run("nil client", func(t *testing.T) {
+		t.Parallel()
+
+		d := download.ExportNewDownloaderWithClientForTest(nil)
+
+		got, err := d.FetchBundle(context.Background(), strings.NewReader(`{}`))
+		if err == nil {
+			t.Fatal("FetchBundle() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle: nil downloader/client" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle: nil downloader/client")
+		}
+		if got != "" {
+			t.Fatalf("got = %q, want empty string on error", got)
+		}
+	})
+
+	t.Run("nil context uses background context", func(t *testing.T) {
+		t.Parallel()
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"bundle_url":"https://example.com/file.zip"}`)
+		}))
+		defer srv.Close()
+
+		d := download.NewDownloader(&client.Client{
+			HTTPClient: srv.Client(),
+			BaseURL:    srv.URL + "/",
+			ProjectID:  "project-id",
+		})
+
+		//lint:ignore SA1012 intentionally passing nil context in this test
+		got, err := d.FetchBundle(nil, strings.NewReader(`{"format":"json"}`)) //nolint:staticcheck // nil ctx is required for this test
+		if err != nil {
+			t.Fatalf("FetchBundle() unexpected error = %v", err)
+		}
+		if got != "https://example.com/file.zip" {
+			t.Fatalf("got = %q, want %q", got, "https://example.com/file.zip")
+		}
+	})
+
+	t.Run("canceled context returns wrapped context error", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		d := download.NewDownloader(&client.Client{
+			HTTPClient: &http.Client{},
+			ProjectID:  "project-id",
+		})
+
+		got, err := d.FetchBundle(ctx, strings.NewReader(`{}`))
+		if err == nil {
+			t.Fatal("FetchBundle() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle: context: context canceled" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle: context: context canceled")
+		}
+		if got != "" {
+			t.Fatalf("got = %q, want empty string on error", got)
+		}
+	})
+}
 
 func TestDownloader_FetchBundle_Variants(t *testing.T) {
 	target := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/download", projectID)

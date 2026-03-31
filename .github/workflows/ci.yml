@@ -22,7 +22,7 @@ jobs:
         cache: false
         
     - name: Run tests
-      run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./... -v -short
+      run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./... -v -short -shuffle=on
     
     - uses: qltysh/qlty-action/coverage@v2
       with:

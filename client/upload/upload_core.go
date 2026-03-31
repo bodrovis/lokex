@@ -51,6 +51,15 @@ func (f uploadBodyFactory) NewBody() (io.ReadCloser, error) {
 	return newUploadBody(f.ctx, f.params, f.readPath)
 }
 
+var kickoffUploadStreamingFn = func(
+	u *Uploader,
+	ctx context.Context,
+	body UploadParams,
+	cleanPath string,
+) (string, error) {
+	return u.kickoffUploadStreaming(ctx, body, cleanPath)
+}
+
 // NewUploader creates a new Uploader bound to c.
 func NewUploader(c *client.Client) *Uploader {
 	if c == nil {
@@ -106,7 +115,7 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath stri
 		}
 	}
 
-	processID, err := u.kickoffUploadStreaming(ctx, body, readPath)
+	processID, err := kickoffUploadStreamingFn(u, ctx, body, readPath)
 	if err != nil {
 		if errors.Is(err, ErrNoProcessID) {
 			if poll {

@@ -9,6 +9,12 @@ import (
 	"strings"
 )
 
+var (
+	removePathFn = os.Remove
+	symlinkFn    = os.Symlink
+	readAllFn    = io.ReadAll
+)
+
 func extractSymlinkEntry(f *zip.File, targetAbs, destReal string, p Policy) error {
 	if !p.AllowSymlinks {
 		return nil
@@ -23,13 +29,13 @@ func extractSymlinkEntry(f *zip.File, targetAbs, destReal string, p Policy) erro
 		return err
 	}
 
-	_ = os.Remove(targetAbs)
+	_ = removePathFn(targetAbs)
 
 	if err := validateSymlinkPlacement(f.Name, targetAbs, destReal, linkTarget); err != nil {
 		return err
 	}
 
-	if err := os.Symlink(linkTarget, targetAbs); err != nil {
+	if err := symlinkFn(linkTarget, targetAbs); err != nil {
 		return fmt.Errorf("create symlink: %w", err)
 	}
 
@@ -41,12 +47,18 @@ func readSymlinkTarget(f *zip.File) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer func() {
+		_ = rc.Close()
+	}()
 
 	const maxLinkTarget = 1 << 20 // 1 MiB safety cap
-	linkTargetBytes, rerr := io.ReadAll(io.LimitReader(rc, maxLinkTarget))
-	_ = rc.Close()
+
+	linkTargetBytes, rerr := readAllFn(io.LimitReader(rc, maxLinkTarget+1))
 	if rerr != nil {
 		return "", fmt.Errorf("read symlink target: %w", rerr)
+	}
+	if len(linkTargetBytes) > maxLinkTarget {
+		return "", fmt.Errorf("symlink target too large")
 	}
 
 	return strings.TrimSpace(string(linkTargetBytes)), nil
@@ -63,7 +75,7 @@ func validateSymlinkTargetString(entryName, linkTarget string) error {
 }
 
 func validateSymlinkPlacement(entryName, targetAbs, destReal, linkTarget string) error {
-	parentResolved, err := filepath.EvalSymlinks(filepath.Dir(targetAbs))
+	parentResolved, err := evalSymlinksPathFn(filepath.Dir(targetAbs))
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("symlink parent resolve error: %w", err)
@@ -73,12 +85,12 @@ func validateSymlinkPlacement(entryName, targetAbs, destReal, linkTarget string)
 	}
 
 	linkAbs := filepath.Join(parentResolved, filepath.Base(targetAbs))
-	if !isPathWithinBase(destReal, linkAbs) {
+	if !isPathWithinBaseFn(destReal, linkAbs) {
 		return fmt.Errorf("symlink destination escapes extraction root: %q", linkAbs)
 	}
 
 	targetCandidate := filepath.Join(parentResolved, linkTarget)
-	if !isPathWithinBase(destReal, targetCandidate) {
+	if !isPathWithinBaseFn(destReal, targetCandidate) {
 		return fmt.Errorf("symlink target escapes extraction root: %q -> %q", entryName, linkTarget)
 	}
 

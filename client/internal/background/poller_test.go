@@ -2,6 +2,7 @@ package background_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -335,13 +336,215 @@ func TestPollProcesses_NilContext(t *testing.T) {
 	}
 }
 
+func TestPollProcesses(t *testing.T) {
+	t.Run("caller context error before first round", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		cli := newTestClient(t)
+
+		got, err := background.PollProcesses(ctx, []string{"p1"}, cli)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want %v", err, context.Canceled)
+		}
+		if got != nil {
+			t.Fatalf("got = %+v, want nil on error", got)
+		}
+	})
+
+	t.Run("poll budget expired during round stops with best effort results", func(t *testing.T) {
+		restorePollRound := background.ExportSetPollRoundForTest(
+			func(ctx context.Context, _ *client.Client, pending map[string]struct{}, _ int) ([]background.QueuedProcess, map[string]error) {
+				<-ctx.Done()
+
+				return []background.QueuedProcess{
+					{ProcessID: "p1", Status: background.StatusQueued},
+				}, nil
+			},
+		)
+		defer restorePollRound()
+
+		cli := newTestClient(t,
+			withPollWait(time.Millisecond, 5*time.Millisecond),
+		)
+
+		got, err := background.PollProcesses(context.Background(), []string{"p1"}, cli)
+		if err != nil {
+			t.Fatalf("PollProcesses() unexpected error = %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want %d", len(got), 1)
+		}
+		if got[0].ProcessID != "p1" || got[0].Status != background.StatusQueued {
+			t.Fatalf("got[0] = %+v, want queued p1", got[0])
+		}
+	})
+
+	t.Run("poll budget expired before first round returns best effort results", func(t *testing.T) {
+		cli := newTestClient(t)
+		cli.PollMaxWait = -time.Millisecond
+
+		got, err := background.PollProcesses(context.Background(), []string{"p1", "", "p1"}, cli)
+		if err != nil {
+			t.Fatalf("PollProcesses() unexpected error = %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("len(got) = %d, want %d", len(got), 2)
+		}
+		if got[0].ProcessID != "p1" || got[0].Status != background.StatusQueued {
+			t.Fatalf("got[0] = %+v, want queued p1", got[0])
+		}
+		if got[1].ProcessID != "p1" || got[1].Status != background.StatusQueued {
+			t.Fatalf("got[1] = %+v, want queued duplicate p1", got[1])
+		}
+	})
+
+	t.Run("next sleep wait false stops polling with best effort results", func(t *testing.T) {
+		restorePollRound := background.ExportSetPollRoundForTest(
+			func(_ context.Context, _ *client.Client, pending map[string]struct{}, _ int) ([]background.QueuedProcess, map[string]error) {
+				return []background.QueuedProcess{
+					{ProcessID: "p1", Status: background.StatusQueued},
+				}, nil
+			},
+		)
+		defer restorePollRound()
+
+		restoreNextSleep := background.ExportSetNextSleepWaitForTest(
+			func(time.Duration, time.Time) (time.Duration, bool) {
+				return 0, false
+			},
+		)
+		defer restoreNextSleep()
+
+		cli := newTestClient(t,
+			withPollWait(time.Millisecond, time.Second),
+		)
+
+		got, err := background.PollProcesses(context.Background(), []string{"p1"}, cli)
+		if err != nil {
+			t.Fatalf("PollProcesses() unexpected error = %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want %d", len(got), 1)
+		}
+		if got[0].ProcessID != "p1" || got[0].Status != background.StatusQueued {
+			t.Fatalf("got[0] = %+v, want queued p1", got[0])
+		}
+	})
+
+	t.Run("sleep stop breaks polling with best effort results", func(t *testing.T) {
+		restorePollRound := background.ExportSetPollRoundForTest(
+			func(_ context.Context, _ *client.Client, pending map[string]struct{}, _ int) ([]background.QueuedProcess, map[string]error) {
+				return []background.QueuedProcess{
+					{ProcessID: "p1", Status: background.StatusQueued},
+				}, nil
+			},
+		)
+		defer restorePollRound()
+
+		restoreSleep := background.ExportSetSleepWithTimerForTest(
+			func(context.Context, *time.Timer, time.Duration) error {
+				return context.DeadlineExceeded
+			},
+		)
+		defer restoreSleep()
+
+		cli := newTestClient(t,
+			withPollWait(time.Millisecond, time.Second),
+		)
+
+		got, err := background.PollProcesses(context.Background(), []string{"p1"}, cli)
+		if err != nil {
+			t.Fatalf("PollProcesses() unexpected error = %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("len(got) = %d, want %d", len(got), 1)
+		}
+		if got[0].ProcessID != "p1" || got[0].Status != background.StatusQueued {
+			t.Fatalf("got[0] = %+v, want queued p1", got[0])
+		}
+	})
+}
+
+func TestNewStoppedTimer(t *testing.T) {
+	restore := background.ExportSetNewTimerForTest(func(time.Duration) *time.Timer {
+		timer := time.NewTimer(0)
+		<-timer.C
+		return timer
+	})
+	defer restore()
+
+	timer := background.ExportNewStoppedTimer()
+	if timer == nil {
+		t.Fatal("NewStoppedTimer() = nil, want non-nil")
+	}
+}
+
+func TestNextSleepWait(t *testing.T) {
+	t.Parallel()
+
+	t.Run("expired deadline returns false", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := background.ExportNextSleepWait(time.Second, time.Now().Add(-time.Second))
+		if ok {
+			t.Fatal("ok = true, want false")
+		}
+		if got != 0 {
+			t.Fatalf("got = %v, want %v", got, time.Duration(0))
+		}
+	})
+
+	t.Run("non positive sleep falls back to ten milliseconds", func(t *testing.T) {
+		t.Parallel()
+
+		got, ok := background.ExportNextSleepWait(-time.Second, time.Now().Add(time.Second))
+		if !ok {
+			t.Fatal("ok = false, want true")
+		}
+		if got != 10*time.Millisecond {
+			t.Fatalf("got = %v, want %v", got, 10*time.Millisecond)
+		}
+	})
+}
+
+func TestSleepBetweenPollRounds(t *testing.T) {
+	restore := background.ExportSetSleepWithTimerForTest(
+		func(context.Context, *time.Timer, time.Duration) error {
+			return context.DeadlineExceeded
+		},
+	)
+	defer restore()
+
+	ctx := context.Background()
+	pollCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+
+	stopped, err := background.ExportSleepBetweenPollRounds(ctx, pollCtx, timer, time.Millisecond)
+	if err != nil {
+		t.Fatalf("SleepBetweenPollRounds() unexpected error = %v", err)
+	}
+	if !stopped {
+		t.Fatal("stopped = false, want true")
+	}
+}
+
 // === helpers ===
 
 type testClientConfig struct {
-	token     string
-	projectID string
-	userAgent string
-	srv       *httptest.Server
+	token           string
+	projectID       string
+	userAgent       string
+	srv             *httptest.Server
+	httpClient      *http.Client
+	baseURL         string
+	httpTimeout     time.Duration
+	pollInitialWait time.Duration
+	pollMaxWait     time.Duration
+	maxRetries      int
 }
 
 type testClientOption func(*testClientConfig)
@@ -370,12 +573,23 @@ func withServer(srv *httptest.Server) testClientOption {
 	}
 }
 
+func withPollWait(initial, max time.Duration) testClientOption {
+	return func(c *testClientConfig) {
+		c.pollInitialWait = initial
+		c.pollMaxWait = max
+	}
+}
+
 func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 	t.Helper()
 
 	cfg := testClientConfig{
-		token:     "test-token",
-		projectID: "test-project",
+		token:           "test-token",
+		projectID:       "test-project",
+		httpTimeout:     2 * time.Second,
+		pollInitialWait: 5 * time.Millisecond,
+		pollMaxWait:     250 * time.Millisecond,
+		maxRetries:      1,
 	}
 
 	for _, opt := range opts {
@@ -383,19 +597,27 @@ func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 	}
 
 	clientOpts := []client.Option{
-		client.WithPollWait(5*time.Millisecond, 250*time.Millisecond),
+		client.WithHTTPTimeout(cfg.httpTimeout),
+		client.WithPollWait(cfg.pollInitialWait, cfg.pollMaxWait),
+		client.WithMaxRetries(cfg.maxRetries),
 	}
 
-	if cfg.srv != nil {
-		clientOpts = append(clientOpts,
-			client.WithBaseURL(cfg.srv.URL+"/"),
-			client.WithHTTPClient(cfg.srv.Client()),
-		)
-	} else {
-		clientOpts = append(clientOpts,
-			client.WithBaseURL("https://example.test/api2/"),
-			client.WithHTTPClient(&http.Client{}),
-		)
+	switch {
+	case strings.TrimSpace(cfg.baseURL) != "":
+		clientOpts = append(clientOpts, client.WithBaseURL(cfg.baseURL))
+	case cfg.srv != nil:
+		clientOpts = append(clientOpts, client.WithBaseURL(cfg.srv.URL+"/"))
+	default:
+		clientOpts = append(clientOpts, client.WithBaseURL("https://example.test/api2/"))
+	}
+
+	switch {
+	case cfg.httpClient != nil:
+		clientOpts = append(clientOpts, client.WithHTTPClient(cfg.httpClient))
+	case cfg.srv != nil:
+		clientOpts = append(clientOpts, client.WithHTTPClient(cfg.srv.Client()))
+	default:
+		clientOpts = append(clientOpts, client.WithHTTPClient(&http.Client{}))
 	}
 
 	if strings.TrimSpace(cfg.userAgent) != "" {
@@ -408,4 +630,13 @@ func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 	}
 
 	return c
+}
+
+func TestNextPollWait_NonPositiveFallsBackToMinimum(t *testing.T) {
+	got := background.ExportNextPollWait(time.Second, time.Now().Add(-time.Second))
+	want := 10 * time.Millisecond
+
+	if got != want {
+		t.Fatalf("NextPollWait() = %v, want %v", got, want)
+	}
 }

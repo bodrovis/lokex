@@ -10,6 +10,7 @@ import (
 
 	"github.com/bodrovis/lokex/v2/client"
 	"github.com/bodrovis/lokex/v2/client/download"
+	"github.com/bodrovis/lokex/v2/client/internal/background"
 	"github.com/jarcoal/httpmock"
 )
 
@@ -241,4 +242,262 @@ func TestDownloader_FetchBundleAsync_EmptyProcessID(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "empty process id") {
 		t.Fatalf("want empty process id error, got %v", err)
 	}
+}
+
+func TestFetchBundleAsyncPrecheck(t *testing.T) {
+	t.Run("nil downloader", func(t *testing.T) {
+		t.Parallel()
+
+		var d *download.Downloader
+
+		gotCtx, err := download.ExportFetchBundleAsyncPrecheck(
+			d,
+			context.Background(),
+			strings.NewReader(`{}`),
+		)
+		if err == nil {
+			t.Fatal("FetchBundleAsyncPrecheck() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: nil downloader/client" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle async: nil downloader/client")
+		}
+		if gotCtx != nil {
+			t.Fatal("context != nil on error, want nil")
+		}
+	})
+
+	t.Run("nil client", func(t *testing.T) {
+		t.Parallel()
+
+		d := download.ExportNewDownloaderWithClientForTest(nil)
+
+		gotCtx, err := download.ExportFetchBundleAsyncPrecheck(
+			d,
+			context.Background(),
+			strings.NewReader(`{}`),
+		)
+		if err == nil {
+			t.Fatal("FetchBundleAsyncPrecheck() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: nil downloader/client" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle async: nil downloader/client")
+		}
+		if gotCtx != nil {
+			t.Fatal("context != nil on error, want nil")
+		}
+	})
+
+	t.Run("nil context uses background", func(t *testing.T) {
+		t.Parallel()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		gotCtx, err := download.ExportFetchBundleAsyncPrecheck(
+			d,
+			nil,
+			strings.NewReader(`{}`),
+		)
+		if err != nil {
+			t.Fatalf("FetchBundleAsyncPrecheck() unexpected error = %v", err)
+		}
+		if gotCtx == nil {
+			t.Fatal("context = nil, want non-nil")
+		}
+		if gotCtx.Err() != nil {
+			t.Fatalf("context error = %v, want nil", gotCtx.Err())
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		t.Parallel()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		gotCtx, err := download.ExportFetchBundleAsyncPrecheck(
+			d,
+			ctx,
+			strings.NewReader(`{}`),
+		)
+		if err == nil {
+			t.Fatal("FetchBundleAsyncPrecheck() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: context: context canceled" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle async: context: context canceled")
+		}
+		if gotCtx != nil {
+			t.Fatal("context != nil on error, want nil")
+		}
+	})
+}
+
+func TestDownloader_StartAsyncDownload(t *testing.T) {
+	targetPost := "https://api.lokalise.com/api2/projects/" + projectID + "/files/async-download"
+
+	t.Run("DoJSONWithRetry error is wrapped", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewErrorResponder(errors.New("post boom")))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		_, err = download.ExportStartAsyncDownload(
+			d,
+			context.Background(),
+			mustJSONBody(t, map[string]any{"format": "json"}),
+		)
+		if err == nil {
+			t.Fatal("StartAsyncDownload() error = nil, want non-nil")
+		}
+		if !strings.Contains(err.Error(), "fetch bundle async:") {
+			t.Fatalf("error = %q, want wrapped fetch bundle async error", err.Error())
+		}
+	})
+
+	t.Run("empty process id", func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
+
+		httpmock.RegisterResponder("POST", targetPost,
+			httpmock.NewStringResponder(200, `{"process_id":"   "}`))
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		_, err = download.ExportStartAsyncDownload(
+			d,
+			context.Background(),
+			mustJSONBody(t, map[string]any{"format": "json"}),
+		)
+		if err == nil {
+			t.Fatal("StartAsyncDownload() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: empty process id" {
+			t.Fatalf("error = %q, want %q", err.Error(), "fetch bundle async: empty process id")
+		}
+	})
+}
+
+func TestPollAsyncDownloadProcess(t *testing.T) {
+	t.Run("no process results returned", func(t *testing.T) {
+		restore := download.ExportSetPollProcessesForTest(
+			func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
+				return []background.QueuedProcess{}, nil
+			},
+		)
+		defer restore()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		_, err = download.ExportPollAsyncDownloadProcess(d, context.Background(), "xyz")
+		if err == nil {
+			t.Fatal("PollAsyncDownloadProcess() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: no process results returned (process_id=xyz)" {
+			t.Fatalf(
+				"error = %q, want %q",
+				err.Error(),
+				"fetch bundle async: no process results returned (process_id=xyz)",
+			)
+		}
+	})
+
+	t.Run("poll processes error is wrapped", func(t *testing.T) {
+		restore := download.ExportSetPollProcessesForTest(
+			func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
+				return nil, errors.New("poll boom")
+			},
+		)
+		defer restore()
+
+		cli, err := client.NewClient(token, projectID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		d := download.NewDownloader(cli)
+
+		_, err = download.ExportPollAsyncDownloadProcess(d, context.Background(), "xyz")
+		if err == nil {
+			t.Fatal("PollAsyncDownloadProcess() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: poll processes: poll boom" {
+			t.Fatalf(
+				"error = %q, want %q",
+				err.Error(),
+				"fetch bundle async: poll processes: poll boom",
+			)
+		}
+	})
+}
+
+func TestInterpretAsyncDownloadProcess(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default status returns did not finish", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := download.ExportInterpretAsyncDownloadProcess(background.QueuedProcess{
+			ProcessID: "xyz",
+			Status:    "queued",
+		})
+		if err == nil {
+			t.Fatal("InterpretAsyncDownloadProcess() error = nil, want non-nil")
+		}
+		if err.Error() != `fetch bundle async: process xyz did not finish (status="queued")` {
+			t.Fatalf(
+				"error = %q, want %q",
+				err.Error(),
+				`fetch bundle async: process xyz did not finish (status="queued")`,
+			)
+		}
+	})
+
+	t.Run("finished with empty download url and message", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := download.ExportFinishedAsyncDownloadURL(background.QueuedProcess{
+			ProcessID:   "xyz",
+			DownloadURL: "   ",
+			Message:     " no url available ",
+		})
+		if err == nil {
+			t.Fatal("FinishedAsyncDownloadURL() error = nil, want non-nil")
+		}
+		if err.Error() != "fetch bundle async: process xyz finished but download_url is empty: no url available" {
+			t.Fatalf(
+				"error = %q, want %q",
+				err.Error(),
+				"fetch bundle async: process xyz finished but download_url is empty: no url available",
+			)
+		}
+	})
 }

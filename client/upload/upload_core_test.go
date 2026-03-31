@@ -35,6 +35,87 @@ func init() {
 	projectID = testutils.GetEnv("LOKALISE_PROJECT_ID", "123.abc")
 }
 
+func TestUploader_Upload(t *testing.T) {
+	t.Run("nil uploader", func(t *testing.T) {
+		t.Parallel()
+
+		var u *upload.Uploader
+
+		got, err := u.Upload(context.Background(), upload.UploadParams{
+			"filename": "test.json",
+			"data":     "dGVzdA==",
+		}, "", false)
+		if err == nil {
+			t.Fatal("Upload() error = nil, want non-nil")
+		}
+		if err.Error() != "upload: uploader/client is nil" {
+			t.Fatalf("error = %q, want %q", err.Error(), "upload: uploader/client is nil")
+		}
+		if got != "" {
+			t.Fatalf("got = %q, want empty string on error", got)
+		}
+	})
+
+	t.Run("nil client", func(t *testing.T) {
+		t.Parallel()
+
+		u := upload.ExportNewUploaderWithClientForTest(nil)
+
+		got, err := u.Upload(context.Background(), upload.UploadParams{
+			"filename": "test.json",
+			"data":     "dGVzdA==",
+		}, "", false)
+		if err == nil {
+			t.Fatal("Upload() error = nil, want non-nil")
+		}
+		if err.Error() != "upload: uploader/client is nil" {
+			t.Fatalf("error = %q, want %q", err.Error(), "upload: uploader/client is nil")
+		}
+		if got != "" {
+			t.Fatalf("got = %q, want empty string on error", got)
+		}
+	})
+
+	t.Run("nil context uses background", func(t *testing.T) {
+		restore := upload.ExportSetKickoffUploadStreamingForTest(
+			func(_ *upload.Uploader, ctx context.Context, body upload.UploadParams, cleanPath string) (string, error) {
+				if ctx == nil {
+					t.Fatal("ctx = nil, want non-nil")
+				}
+				if ctx.Err() != nil {
+					t.Fatalf("ctx.Err() = %v, want nil", ctx.Err())
+				}
+				if cleanPath != "" {
+					t.Fatalf("cleanPath = %q, want empty string when data is provided", cleanPath)
+				}
+				if body["filename"] != "test.json" {
+					t.Fatalf("filename = %v, want %q", body["filename"], "test.json")
+				}
+				return "pid-123", nil
+			},
+		)
+		defer restore()
+
+		cli, err := client.NewClient(token, projectID, client.WithHTTPTimeout(5*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		u := upload.NewUploader(cli)
+
+		//lint:ignore SA1012 intentionally passing nil context in this test
+		got, err := u.Upload(nil, upload.UploadParams{ //nolint:staticcheck // nil ctx is required for this test
+			"filename": "test.json",
+			"data":     "dGVzdA==",
+		}, "", false)
+		if err != nil {
+			t.Fatalf("Upload() unexpected error = %v", err)
+		}
+		if got != "pid-123" {
+			t.Fatalf("got = %q, want %q", got, "pid-123")
+		}
+	})
+}
+
 func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()

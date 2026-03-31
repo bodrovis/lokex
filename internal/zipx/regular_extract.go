@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+var (
+	createTempFile = os.CreateTemp
+	removeFile     = os.Remove
+	renameFile     = os.Rename
+	chtimesFile    = os.Chtimes
+)
+
 func extractRegularFileEntry(f *zip.File, targetAbs string, p Policy) (int64, error) {
 	rc, err := f.Open()
 	if err != nil {
@@ -25,7 +32,7 @@ func extractRegularFileEntry(f *zip.File, targetAbs string, p Policy) (int64, er
 	n, werr := copyCapped(tmpf, rc, p.MaxFileBytes)
 	werr = closeWithPrecedence(werr, tmpf, rc)
 	if werr != nil {
-		_ = os.Remove(tmp)
+		_ = removeFile(tmp)
 		return 0, werr
 	}
 
@@ -45,7 +52,7 @@ func filePermOrDefault(mode os.FileMode) os.FileMode {
 }
 
 func createTempOutputFile(targetAbs string, perm os.FileMode) (*os.File, string, error) {
-	tmpf, err := os.CreateTemp(filepath.Dir(targetAbs), filepath.Base(targetAbs)+".partial-*")
+	tmpf, err := createTempFile(filepath.Dir(targetAbs), filepath.Base(targetAbs)+".partial-*")
 	if err != nil {
 		return nil, "", err
 	}
@@ -73,14 +80,14 @@ func closeWithPrecedence(current error, closers ...io.Closer) error {
 
 func finalizeExtractedFile(tmp, targetAbs string, modified time.Time, preserveTimes bool) error {
 	// On Windows, rename over existing file may fail. Remove first.
-	_ = os.Remove(targetAbs)
-	if err := os.Rename(tmp, targetAbs); err != nil {
-		_ = os.Remove(tmp)
+	_ = removeFile(targetAbs)
+	if err := renameFile(tmp, targetAbs); err != nil {
+		_ = removeFile(tmp)
 		return err
 	}
 
 	if preserveTimes && !modified.IsZero() {
-		_ = os.Chtimes(targetAbs, modified, modified)
+		_ = chtimesFile(targetAbs, modified, modified)
 	}
 
 	return nil
