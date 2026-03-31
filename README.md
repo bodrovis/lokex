@@ -41,13 +41,17 @@ By default, the base URL is `https://api.lokalise.com/api2/`. You can override i
 Download and unzip a translation bundle into `./locales`:
 
 ```go
-downloader := client.NewDownloader(cli)
+import (
+    "github.com/bodrovis/lokex/v2/client/download"
+)
+
+downloader := download.NewDownloader(cli)
 
 ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 defer cancel()
 
 // call DownloadAsync() for the async download flow
-url, err := downloader.Download(ctx, "./locales", client.DownloadParams{
+url, err := downloader.Download(ctx, "./locales", download.DownloadParams{
     "format": "json",
     // other request params...
 })
@@ -69,7 +73,11 @@ Features:
 Upload a JSON file for the English (`en`) locale:
 
 ```go
-uploader := client.NewUploader(cli)
+import (
+    "github.com/bodrovis/lokex/v2/client/upload"
+)
+
+uploader := upload.NewUploader(cli)
 
 fp := filepath.Join(dir, "en.json")
 
@@ -80,7 +88,7 @@ defer cancel()
 // - if srcPath == "" -> uploader reads from params["filename"]
 // - if srcPath != "" -> uploader reads file bytes from srcPath,
 //   but still sends params["filename"] to Lokalise API as the remote filename.
-pid, err := uploader.Upload(ctx, client.UploadParams{
+pid, err := uploader.Upload(ctx, upload.UploadParams{
 	"filename": fp,      // sent to Lokalise (remote filename)
 	"lang_iso": "en",
 	// other request params...
