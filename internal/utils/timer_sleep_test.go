@@ -49,3 +49,42 @@ func TestSleepWithTimer_UsesDefaultDelayWhenDurationNonPositive(t *testing.T) {
 		})
 	}
 }
+
+func TestSleepWithTimer_ReturnsContextErrorWhenCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+
+	err := utils.SleepWithTimer(ctx, timer, time.Second)
+	if err == nil {
+		t.Fatal("SleepWithTimer() error = nil, want context cancellation error")
+	}
+}
+
+func TestSleepWithTimer_ReusesExpiredTimer(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	timer := time.NewTimer(1 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // let it fire
+
+	start := time.Now()
+	err := utils.SleepWithTimer(ctx, timer, 20*time.Millisecond)
+	elapsed := time.Since(start)
+
+	defer timer.Stop()
+
+	if err != nil {
+		t.Fatalf("SleepWithTimer() error = %v", err)
+	}
+
+	if elapsed < 15*time.Millisecond {
+		t.Fatalf("elapsed = %v, want timer to be reset, not return immediately", elapsed)
+	}
+}

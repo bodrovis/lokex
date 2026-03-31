@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// sleepWithTimer waits for d or returns early on ctx cancellation.
-// Timer is reused to avoid allocations.
+// SleepWithTimer waits for d or returns early on ctx cancellation.
+// timer must be non-nil and must not be used concurrently.
 func SleepWithTimer(ctx context.Context, timer *time.Timer, d time.Duration) error {
 	if d <= 0 {
 		d = 10 * time.Millisecond

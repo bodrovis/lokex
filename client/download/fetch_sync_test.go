@@ -268,7 +268,7 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 	})
 }
 
-func TestFetcher_AllowsEmptyBodyOn2xx(t *testing.T) {
+func TestFetchBundle_EmptyResponseBodyReturnsEmptyBundleURLError(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
 	target := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/download", projectID)

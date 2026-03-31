@@ -44,6 +44,8 @@ var downloadAndUnzipFn = func(d *Downloader, ctx context.Context, bundleURL, des
 
 var encodeJSONBody = utils.EncodeJSONBody
 
+const clientIsNilMsg = "download: downloader/client is nil"
+
 // NewDownloader creates a new Downloader bound to c.
 // c must be non-nil; it is used for HTTP, retry/backoff, and polling.
 func NewDownloader(c *client.Client) *Downloader {
@@ -64,7 +66,7 @@ func NewDownloader(c *client.Client) *Downloader {
 // Returns the bundle_url on success.
 func (d *Downloader) Download(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
 	if d == nil || d.client == nil {
-		return "", errors.New("download: downloader/client is nil")
+		return "", errors.New(clientIsNilMsg)
 	}
 	return d.doDownload(ctx, unzipTo, params, d.FetchBundle)
 }
@@ -79,7 +81,7 @@ func (d *Downloader) Download(ctx context.Context, unzipTo string, params Downlo
 // Returns the final download_url on success.
 func (d *Downloader) DownloadAsync(ctx context.Context, unzipTo string, params DownloadParams) (string, error) {
 	if d == nil || d.client == nil {
-		return "", errors.New("download: downloader/client is nil")
+		return "", errors.New(clientIsNilMsg)
 	}
 	return d.doDownload(ctx, unzipTo, params, d.FetchBundleAsync)
 }
@@ -95,13 +97,13 @@ func (d *Downloader) doDownload(
 	fetch FetchFunc,
 ) (string, error) {
 	if d == nil || d.client == nil {
-		return "", errors.New("download: downloader/client is nil")
+		return "", errors.New(clientIsNilMsg)
 	}
 	if fetch == nil {
 		return "", errors.New("download: fetch func is nil")
 	}
 	if strings.TrimSpace(unzipTo) == "" {
-		return "", errors.New("download: unzipTo is empty")
+		return "", errors.New("download: empty unzip destination")
 	}
 	if ctx == nil {
 		ctx = context.Background()

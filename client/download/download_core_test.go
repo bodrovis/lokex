@@ -78,8 +78,8 @@ func TestDownloader_Download_EmptyUnzipTo(t *testing.T) {
 	d := download.NewDownloader(cli)
 
 	_, err := d.Download(context.Background(), "   ", download.DownloadParams{"format": "json"})
-	if err == nil || !strings.Contains(err.Error(), "unzipTo is empty") {
-		t.Fatalf("want unzipTo is empty error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "empty unzip destination") {
+		t.Fatalf("want empty unzip destination, got %v", err)
 	}
 }
 
@@ -139,8 +139,8 @@ func TestDownloader_DownloadAsync_EmptyUnzipTo(t *testing.T) {
 	d := download.NewDownloader(cli)
 
 	_, err := d.DownloadAsync(context.Background(), "   ", download.DownloadParams{"format": "json"})
-	if err == nil || !strings.Contains(err.Error(), "unzipTo is empty") {
-		t.Fatalf("want unzipTo is empty error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "empty unzip destination") {
+		t.Fatalf("want empty unzip destination error, got %v", err)
 	}
 }
 
@@ -313,8 +313,8 @@ func TestDownloader_DoDownload(t *testing.T) {
 		if err == nil {
 			t.Fatal("DoDownload() error = nil, want non-nil")
 		}
-		if err.Error() != "download: unzipTo is empty" {
-			t.Fatalf("error = %q, want %q", err.Error(), "download: unzipTo is empty")
+		if err.Error() != "download: empty unzip destination" {
+			t.Fatalf("error = %q, want %q", err.Error(), "download: empty unzip destination")
 		}
 		if got != "" {
 			t.Fatalf("got = %q, want empty string on error", got)

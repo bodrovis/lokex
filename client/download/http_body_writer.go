@@ -89,6 +89,7 @@ func finalizeAtomicWrite(tmp syncCloseFile, tmpName, destPath string, closed *bo
 	*closed = true
 
 	// On Windows, rename over an existing file can be unreliable; remove first.
+	// Ignore remove error: destination may not exist yet.
 	_ = removeFile(destPath)
 
 	if err := renameFile(tmpName, destPath); err != nil {

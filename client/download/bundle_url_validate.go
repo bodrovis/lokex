@@ -18,47 +18,52 @@ func validateBundleURL(raw string) (string, error) {
 		return "", fmt.Errorf("download: bad url: %w", err)
 	}
 
-	// Strict mode: only https.
+	if err := validateParsedURL(u); err != nil {
+		return "", err
+	}
+
+	if err := validateHost(u.Hostname()); err != nil {
+		return "", err
+	}
+
+	return u.String(), nil
+}
+
+func validateParsedURL(u *url.URL) error {
 	if !strings.EqualFold(u.Scheme, "https") {
-		return "", fmt.Errorf("download: unsupported url scheme %q", u.Scheme)
+		return fmt.Errorf("download: unsupported url scheme %q", u.Scheme)
 	}
-
 	if u.Host == "" {
-		return "", fmt.Errorf("download: url has empty host")
+		return fmt.Errorf("download: url has empty host")
 	}
-
-	// Don’t allow credentials in URL.
 	if u.User != nil {
-		return "", fmt.Errorf("download: url must not contain userinfo")
+		return fmt.Errorf("download: url must not contain userinfo")
 	}
-
-	// Optional: reject fragments (usually useless for downloads).
 	if u.Fragment != "" {
-		return "", fmt.Errorf("download: url must not contain fragment")
+		return fmt.Errorf("download: url must not contain fragment")
 	}
+	return nil
+}
 
-	host := strings.ToLower(u.Hostname())
+func validateHost(host string) error {
+	host = strings.ToLower(host)
 	if host == "" {
-		return "", fmt.Errorf("download: url has empty hostname")
+		return fmt.Errorf("download: url has empty hostname")
 	}
 	if host == "localhost" {
-		return "", fmt.Errorf("download: localhost is not allowed")
+		return fmt.Errorf("download: localhost is not allowed")
 	}
 	if strings.HasSuffix(host, ".localhost") ||
 		strings.HasSuffix(host, ".local") ||
 		strings.HasSuffix(host, ".internal") {
-		return "", fmt.Errorf("download: local/internal hostname is not allowed")
+		return fmt.Errorf("download: local/internal hostname is not allowed")
 	}
 
-	// Block IP literals in private/loopback/etc ranges.
-	if ip := net.ParseIP(host); ip != nil {
-		if isBlockedIP(ip) {
-			return "", fmt.Errorf("download: ip %s is not allowed", ip.String())
-		}
+	if ip := net.ParseIP(host); ip != nil && isBlockedIP(ip) {
+		return fmt.Errorf("download: ip %s is not allowed", ip.String())
 	}
 
-	// Return the parsed URL as normalized by net/url serialization.
-	return u.String(), nil
+	return nil
 }
 
 func isBlockedIP(ip net.IP) bool {

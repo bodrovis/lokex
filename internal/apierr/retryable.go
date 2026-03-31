@@ -25,49 +25,66 @@ func IsRetryable(err error) bool {
 		return false
 	}
 
-	// 1) Real network timeouts from the net stack (dial/read/TLS): *net.OpError
-	var op *net.OpError
-	if errors.As(err, &op) && op.Timeout() {
+	if isNetTimeout(err) {
 		return true
 	}
-
-	// 2) Pure context budget errors → NOT retryable
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if isContextError(err) {
 		return false
 	}
-
-	// 3) Other Timeout()-ish errors (e.g., url.Error, custom mocks) → retryable
-	var hasTimeout interface{ Timeout() bool }
-	if errors.As(err, &hasTimeout) && hasTimeout.Timeout() {
+	if hasTimeout(err) {
+		return true
+	}
+	if isTransientIO(err) {
+		return true
+	}
+	if isRetryableAPIError(err) {
 		return true
 	}
 
-	// 4) Flaky transport / short reads → retryable
-	if errors.Is(err, io.ErrUnexpectedEOF) ||
+	return false
+}
+
+func isNetTimeout(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Timeout()
+}
+
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func hasTimeout(err error) bool {
+	var te interface{ Timeout() bool }
+	return errors.As(err, &te) && te.Timeout()
+}
+
+func isTransientIO(err error) bool {
+	return errors.Is(err, io.ErrUnexpectedEOF) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, syscall.ECONNRESET) ||
 		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNABORTED) {
-		return true
-	}
+		errors.Is(err, syscall.ECONNABORTED)
+}
 
-	// 5) Retryable HTTP statuses → retryable
+func isRetryableAPIError(err error) bool {
 	var ae *APIError
-	if errors.As(err, &ae) {
-		switch ae.Status {
-		case http.StatusRequestTimeout, // 408
-			http.StatusTooEarly,            // 425
-			http.StatusTooManyRequests,     // 429
-			http.StatusInternalServerError, // 500
-			http.StatusBadGateway,          // 502
-			http.StatusServiceUnavailable,  // 503
-			http.StatusGatewayTimeout:      // 504
-			return true
-		}
+	if !errors.As(err, &ae) {
+		return false
 	}
 
-	return false
+	switch ae.Status {
+	case http.StatusRequestTimeout,
+		http.StatusTooEarly,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
 }
 
 // JitteredBackoff returns a randomized delay in [0.5*base, 1.5*base).

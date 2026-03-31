@@ -102,7 +102,7 @@ func (d *Downloader) downloadAndValidateZip(
 ) error {
 	ua := d.client.UserAgent
 
-	if err := d.client.WithExpBackoff(ctx, "download", func(_ int) error {
+	return d.client.WithExpBackoff(ctx, "download", func(_ int) error {
 		if err := d.downloadOnce(ctx, bundleURL, tmpPath, ua); err != nil {
 			return err
 		}
@@ -110,11 +110,7 @@ func (d *Downloader) downloadAndValidateZip(
 			return fmt.Errorf("validate zip: %w", err)
 		}
 		return nil
-	}, nil); err != nil {
-		return err
-	}
-
-	return nil
+	}, nil)
 }
 
 func unzipDownloadedBundle(tmpPath, destDir string) error {

@@ -15,56 +15,65 @@ var openFile = func(name string) (io.ReadCloser, error) {
 }
 
 func writeUploadJSON(w *bufio.Writer, params UploadParams, cleanPath string, spec uploadDataSpec) error {
-	// Start JSON object.
+	// Manually build JSON to avoid buffering the whole payload in memory.
 	if _, err := w.WriteString("{"); err != nil {
 		return err
 	}
 
 	first := true
-	writeComma := func() error {
-		if first {
-			first = false
-			return nil
-		}
-		_, err := w.WriteString(",")
+	if err := writeUploadParams(w, params, &first); err != nil {
+		return err
+	}
+	if err := writeUploadDataField(w, cleanPath, spec, &first); err != nil {
 		return err
 	}
 
-	// Write params except "data" (unordered).
+	_, err := w.WriteString("}")
+	return err
+}
+
+func writeUploadParams(w *bufio.Writer, params UploadParams, first *bool) error {
+	// Write all params except "data" (handled separately for streaming).
 	for k, v := range params {
 		if k == "data" {
 			continue
 		}
-		if err := writeUploadKV(w, k, v, &first); err != nil {
+		if err := writeUploadKV(w, k, v, first); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
-	// Now write "data".
-	if err := writeComma(); err != nil {
+func writeUploadDataField(w *bufio.Writer, cleanPath string, spec uploadDataSpec, first *bool) error {
+	// "data" must be written last and streamed (can be large).
+	if err := writeUploadComma(w, first); err != nil {
 		return err
 	}
-
 	if _, err := w.WriteString(`"data":"`); err != nil {
 		return err
 	}
-
 	if err := writeUploadData(w, cleanPath, spec); err != nil {
 		return err
 	}
+	_, err := w.WriteString(`"`)
+	return err
+}
 
-	// Close string + object.
-	_, err := w.WriteString(`"}`)
+func writeUploadComma(w *bufio.Writer, first *bool) error {
+	// Track whether a comma is needed between JSON fields.
+	if *first {
+		*first = false
+		return nil
+	}
+	_, err := w.WriteString(",")
 	return err
 }
 
 func writeUploadKV(w *bufio.Writer, k string, v any, first *bool) error {
-	if !*first {
-		if _, err := w.WriteString(","); err != nil {
-			return err
-		}
-	} else {
-		*first = false
+	// Write "key":value pair with proper comma handling.
+	if err := writeUploadComma(w, first); err != nil {
+		return err
 	}
 
 	// json.Marshal(string) cannot fail
@@ -86,54 +95,52 @@ func writeUploadKV(w *bufio.Writer, k string, v any, first *bool) error {
 }
 
 func writeUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) error {
-	// Caller provided base64 string -> just write as-is.
+	// If caller already provided base64 string, write it directly.
 	if !spec.useFile && !spec.dataWasBytes {
 		_, err := w.WriteString(spec.dataString)
 		return err
 	}
 
-	// Pick a reader source (file or bytes).
-	var (
-		r         io.Reader
-		closeFile func() error
-	)
-
-	switch {
-	case spec.useFile:
-		f, err := openFile(cleanPath)
-		if err != nil {
-			return err
-		}
-		r = f
-		closeFile = f.Close
-
-	case spec.dataWasBytes:
-		r = bytes.NewReader(spec.dataBytes)
+	// Otherwise stream data (file or bytes) through base64 encoder.
+	r, closeFn, err := uploadDataReader(cleanPath, spec)
+	if err != nil {
+		return err
 	}
 
 	enc := base64.NewEncoder(base64.StdEncoding, w)
 
-	_, err := io.Copy(enc, r)
-
-	// Close file (if any), but don’t clobber existing error.
-	if closeFile != nil {
-		if cerr := closeFile(); cerr != nil {
-			if err == nil {
-				err = cerr
-			} else {
-				err = errors.Join(err, cerr)
-			}
-		}
+	_, err = io.Copy(enc, r)
+	if closeFn != nil {
+		err = joinErr(err, closeFn())
 	}
-
-	// Close encoder (flushes final base64 padding).
-	if cerr := enc.Close(); cerr != nil {
-		if err == nil {
-			err = cerr
-		} else {
-			err = errors.Join(err, cerr)
-		}
-	}
+	err = joinErr(err, enc.Close())
 
 	return err
+}
+
+func uploadDataReader(cleanPath string, spec uploadDataSpec) (io.Reader, func() error, error) {
+	// Select source for upload data.
+	switch {
+	case spec.useFile:
+		f, err := openFile(cleanPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		return f, f.Close, nil
+	case spec.dataWasBytes:
+		return bytes.NewReader(spec.dataBytes), nil, nil
+	default:
+		return nil, nil, nil
+	}
+}
+
+func joinErr(err error, next error) error {
+	// Combine errors without losing the original one.
+	if next == nil {
+		return err
+	}
+	if err == nil {
+		return next
+	}
+	return errors.Join(err, next)
 }
