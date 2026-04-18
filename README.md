@@ -7,6 +7,8 @@
 
 `lokex` is a Go client for uploading and downloading translations from [Lokalise](https://lokalise.com). It provides a thin wrapper around the Lokalise API with retry/backoff, async polling, safe unzipping, and strict upload validation.
 
+> Lokex also has a cross-platform CLI version: [lokex-cli](https://github.com/bodrovis/lokex-cli).
+
 ## Installation
 
 ```bash
