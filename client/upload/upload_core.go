@@ -86,6 +86,18 @@ var ErrNoProcessID = errors.New("upload: no process id returned")
 // when the process reaches "finished" (otherwise it errors). If poll is false,
 // it returns immediately after kickoff with the process id.
 func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath string, poll bool) (string, error) {
+	processID, err := u.uploadSingle(ctx, params, srcPath, poll)
+	if err != nil {
+		return "", err
+	}
+
+	if !poll {
+		return processID, nil
+	}
+	return u.pollUntilFinished(ctx, processID)
+}
+
+func (u *Uploader) uploadSingle(ctx context.Context, params UploadParams, srcPath string, poll bool) (string, error) {
 	if u == nil || u.client == nil {
 		return "", errors.New("upload: uploader/client is nil")
 	}
@@ -126,8 +138,5 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath stri
 		return "", err
 	}
 
-	if !poll {
-		return processID, nil
-	}
-	return u.pollUntilFinished(ctx, processID)
+	return processID, nil
 }

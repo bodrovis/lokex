@@ -13,6 +13,7 @@
 package download
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -113,16 +114,7 @@ func (d *Downloader) doDownload(
 		return "", fmt.Errorf("download: context: %w", err)
 	}
 
-	// copy to avoid mutating caller's map
-	var body map[string]any
-	if len(params) > 0 {
-		body = make(map[string]any, len(params))
-		maps.Copy(body, params)
-	} else {
-		body = map[string]any{}
-	}
-
-	rdr, err := encodeJSONBody(body)
+	rdr, err := prepareBodyReader(params)
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
@@ -137,4 +129,22 @@ func (d *Downloader) doDownload(
 	}
 
 	return bundleURL, nil
+}
+
+func prepareBodyReader(params DownloadParams) (*bytes.Reader, error) {
+	// copy to avoid mutating caller's map
+	var body map[string]any
+	if len(params) > 0 {
+		body = make(map[string]any, len(params))
+		maps.Copy(body, params)
+	} else {
+		body = map[string]any{}
+	}
+
+	rdr, err := encodeJSONBody(body)
+	if err != nil {
+		return nil, err
+	}
+
+	return rdr, nil
 }

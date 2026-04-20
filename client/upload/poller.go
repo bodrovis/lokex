@@ -36,14 +36,18 @@ func (u *Uploader) pollUntilFinished(ctx context.Context, processID string) (str
 	}
 
 	p := results[0]
-	st := utils.NormalizeString(p.Status)
+	return handleProcessStatus(processID, p.Status, p.Message)
+}
+
+func handleProcessStatus(processID, status, message string) (string, error) {
+	st := utils.NormalizeString(status)
 
 	switch st {
 	case background.StatusFinished:
 		return processID, nil
 
 	case background.StatusFailed:
-		if msg := strings.TrimSpace(p.Message); msg != "" {
+		if msg := strings.TrimSpace(message); msg != "" {
 			return "", fmt.Errorf("upload: process %s failed: %s", processID, msg)
 		}
 		return "", fmt.Errorf("upload: process %s failed", processID)
