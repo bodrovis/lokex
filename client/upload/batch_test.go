@@ -94,8 +94,8 @@ func TestUploader_UploadBatch(t *testing.T) {
 
 		u := newTestUploader(t)
 
-		//nolint:staticcheck // nil ctx is required for this test
-		got, err := u.UploadBatch(nil, []upload.BatchUploadItem{
+		//lint:ignore SA1012 intentionally passing nil context in this test
+		got, err := u.UploadBatch(nil, []upload.BatchUploadItem{ //nolint:staticcheck // nil ctx is required for this test
 			{
 				Params: upload.UploadParams{
 					"filename": "test.json",
@@ -204,6 +204,7 @@ func TestUploader_UploadBatch_ContextDeadlineExceeded(t *testing.T) {
 		t.Fatalf("got.Items len = %d, want 0 on fatal error", len(got.Items))
 	}
 }
+
 func TestAcquireBatchUploadSlot_Success(t *testing.T) {
 	sem := make(chan struct{}, 1)
 
