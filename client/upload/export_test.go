@@ -22,16 +22,6 @@ func ExportPollUntilFinished(u *Uploader, ctx context.Context, processID string)
 	return u.pollUntilFinished(ctx, processID)
 }
 
-func ExportSetPollProcessesForTest(
-	fn func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error),
-) func() {
-	prev := pollProcessesFn
-	pollProcessesFn = fn
-	return func() {
-		pollProcessesFn = prev
-	}
-}
-
 func ExportNewUploadBody(ctx context.Context, params UploadParams, cleanPath string) (io.ReadCloser, error) {
 	return newUploadBody(ctx, params, cleanPath)
 }
@@ -113,4 +103,103 @@ func ExportUploadBodyFactoryReadForTest() (int, error) {
 	var f uploadBodyFactory
 	buf := make([]byte, 1)
 	return f.Read(buf)
+}
+
+func ExportSetBatchUploadSingleForTest(
+	fn func(u *Uploader, ctx context.Context, params UploadParams, srcPath string) (string, error),
+) func() {
+	prev := batchUploadSingleFn
+	batchUploadSingleFn = fn
+	return func() {
+		batchUploadSingleFn = prev
+	}
+}
+
+func ExportSetBatchUploadConcurrencyForTest(n int) func() {
+	prev := batchUploadConcurrency
+	batchUploadConcurrency = n
+	return func() {
+		batchUploadConcurrency = prev
+	}
+}
+
+type ExportQueuedProcessForTest = background.QueuedProcess
+
+func ExportSetPollProcessesForTest(
+	fn func(context.Context, []string, *client.Client) ([]ExportQueuedProcessForTest, error),
+) func() {
+	prev := pollProcessesFn
+	pollProcessesFn = func(ctx context.Context, ids []string, c *client.Client) ([]background.QueuedProcess, error) {
+		return fn(ctx, ids, c)
+	}
+	return func() {
+		pollProcessesFn = prev
+	}
+}
+
+func ExportNewBatchUploadResultItemForTest(
+	index int,
+	item BatchUploadItem,
+) BatchUploadResultItem {
+	return newBatchUploadResultItem(index, item)
+}
+
+func ExportCollectBatchProcessIDsForTest(
+	results []BatchUploadResultItem,
+) ([]string, map[string][]int) {
+	return collectBatchProcessIDs(results)
+}
+
+func ExportMarkBatchPollErrorForTest(
+	results []BatchUploadResultItem,
+	processIDs []string,
+	idToIndexes map[string][]int,
+	err error,
+) {
+	markBatchPollError(results, processIDs, idToIndexes, err)
+}
+
+func ExportSetBatchHandleProcessStatusForTest(
+	fn func(processID, status, message string) (string, error),
+) func() {
+	prev := batchHandleProcessStatusFn
+	batchHandleProcessStatusFn = fn
+	return func() {
+		batchHandleProcessStatusFn = prev
+	}
+}
+
+func ExportPollBatchResultsForTest(
+	u *Uploader,
+	ctx context.Context,
+	results []BatchUploadResultItem,
+) {
+	u.pollBatchResults(ctx, results)
+}
+
+func ExportAcquireBatchUploadSlotForTest(ctx context.Context, sem chan struct{}) error {
+	return acquireBatchUploadSlot(ctx, sem)
+}
+
+func ExportReleaseBatchUploadSlotForTest(sem chan struct{}) {
+	releaseBatchUploadSlot(sem)
+}
+
+func ExportCallBatchUploadSingleForTest(
+	u *Uploader,
+	ctx context.Context,
+	params UploadParams,
+	srcPath string,
+) (string, error) {
+	return batchUploadSingleFn(u, ctx, params, srcPath)
+}
+
+func ExportKickoffBatchUploadItemForTest(
+	u *Uploader,
+	ctx context.Context,
+	sem chan struct{},
+	item BatchUploadItem,
+	result *BatchUploadResultItem,
+) {
+	u.kickoffBatchUploadItem(ctx, sem, item, result)
 }

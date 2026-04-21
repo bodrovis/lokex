@@ -109,6 +109,101 @@ Features:
 - Accepts `data` as a pre-encoded string or raw `[]byte`.
 - Polls the process until it finishes (unless polling is disabled).
 
+### Batch Uploads
+
+Upload several locale files in one call:
+
+```go
+import (
+    "context"
+    "fmt"
+    "log"
+    "path/filepath"
+    "time"
+
+    "github.com/bodrovis/lokex/v2/client/upload"
+)
+
+uploader := upload.NewUploader(cli)
+
+dir := "/path/to/locales"
+
+items := []upload.BatchUploadItem{
+    {
+        Params: upload.UploadParams{
+            "filename": filepath.Join(dir, "en.json"),
+            "lang_iso": "en",
+        },
+        // SrcPath omitted:
+        // uploader reads bytes from Params["filename"]
+    },
+    {
+        Params: upload.UploadParams{
+            "filename": "locales/%LANG_ISO%.json", // remote filename sent to Lokalise
+            "lang_iso": "de",
+        },
+        SrcPath: filepath.Join(dir, "de.json"), // local file to read bytes from
+    },
+    {
+        Params: upload.UploadParams{
+            "filename": "locales/%LANG_ISO%.json",
+            "lang_iso": "fr",
+        },
+        SrcPath: filepath.Join(dir, "fr.json"),
+    },
+}
+
+ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+defer cancel()
+
+// poll=true:
+// - starts all uploads
+// - then polls all successfully started processes together
+//
+// poll=false:
+// - returns right after kickoff with per-item process IDs/errors
+result, err := uploader.UploadBatch(ctx, items, true)
+if err != nil {
+    log.Fatal(err) // fatal batch-level error only
+}
+
+for _, item := range result.Items {
+    if item.Err != nil {
+        fmt.Printf("upload failed: index=%d src=%q err=%v\n", item.Index, item.SrcPath, item.Err)
+        continue
+    }
+
+    fmt.Printf("upload finished: index=%d src=%q process_id=%s\n", item.Index, item.SrcPath, item.ProcessID)
+}
+
+if result.HasErrors() {
+    fmt.Println("some uploads failed")
+}
+
+fmt.Printf("successful process IDs: %#v\n", result.SuccessfulProcessIDs())
+```
+
+`UploadBatch` returns:
+
+- `BatchUploadResult` — per-item results, always in the same order as the input slice
+- `error` — only for fatal batch-level problems such as a nil uploader/client or an already-cancelled context
+
+Each `BatchUploadResultItem` contains:
+
+- `Index` — original position in the input slice
+- `SrcPath` — local source path used for that item
+- `ProcessID` — Lokalise process ID for successful kickoff/completion
+- `Err` — per-item error; does not fail the whole batch
+
+Notes:
+
+- Upload kickoff runs with a maximum concurrency of 6 files at a time
+- Each file still uses the same single-upload logic internally, including retries
+- Partial success is supported: one failed file does not discard successful ones
+- `SrcPath` is optional per item:
+  - if `SrcPath == ""`, uploader reads bytes from `Params["filename"]`
+  - if `SrcPath != ""`, uploader reads bytes from `SrcPath`, but still sends `Params["filename"]` to Lokalise as the remote filename
+
 ## Testing
 
 Unit tests use [httpmock](https://github.com/jarcoal/httpmock). Integration tests hit the real Lokalise API and require credentials in `.env`.
