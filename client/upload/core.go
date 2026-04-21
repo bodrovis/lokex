@@ -98,15 +98,11 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath stri
 }
 
 func (u *Uploader) uploadSingle(ctx context.Context, params UploadParams, srcPath string, poll bool) (string, error) {
-	if u == nil || u.client == nil {
-		return "", errors.New("upload: uploader/client is nil")
+	if err := validateUploadSingleInput(u, ctx); err != nil {
+		return "", err
 	}
 	if ctx == nil {
 		ctx = context.Background()
-	}
-
-	if err := ctx.Err(); err != nil {
-		return "", err
 	}
 
 	body, filename, err := cloneAndValidateParams(params)
@@ -114,29 +110,55 @@ func (u *Uploader) uploadSingle(ctx context.Context, params UploadParams, srcPat
 		return "", err
 	}
 
-	readPath := ""
-	if _, hasData := body["data"]; !hasData {
-		readPath = strings.TrimSpace(srcPath)
-		if readPath == "" {
-			readPath = filename
-		}
-		readPath = filepath.Clean(readPath)
-
-		if err := ensureFileIsRegular(readPath); err != nil {
-			return "", err
-		}
+	readPath, err := resolveUploadReadPath(body, srcPath, filename)
+	if err != nil {
+		return "", err
 	}
 
 	processID, err := kickoffUploadStreamingFn(u, ctx, body, readPath)
 	if err != nil {
-		if errors.Is(err, ErrNoProcessID) {
-			if poll {
-				return "", fmt.Errorf("upload: polling requested but unavailable: %w", err)
-			}
-			return "", nil
-		}
-		return "", err
+		return handleUploadKickoffError(err, poll)
 	}
 
 	return processID, nil
+}
+
+func validateUploadSingleInput(u *Uploader, ctx context.Context) error {
+	if u == nil || u.client == nil {
+		return errors.New("upload: uploader/client is nil")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func resolveUploadReadPath(body UploadParams, srcPath, filename string) (string, error) {
+	if _, hasData := body["data"]; hasData {
+		return "", nil
+	}
+
+	readPath := strings.TrimSpace(srcPath)
+	if readPath == "" {
+		readPath = filename
+	}
+	readPath = filepath.Clean(readPath)
+
+	if err := ensureFileIsRegular(readPath); err != nil {
+		return "", err
+	}
+
+	return readPath, nil
+}
+
+func handleUploadKickoffError(err error, poll bool) (string, error) {
+	if errors.Is(err, ErrNoProcessID) {
+		if poll {
+			return "", fmt.Errorf("upload: polling requested but unavailable: %w", err)
+		}
+		return "", nil
+	}
+	return "", err
 }
