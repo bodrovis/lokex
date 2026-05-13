@@ -222,4 +222,4 @@ go test ./... -v
 
 ## License
 
-(c) [Ilya Krukowski](https://bodrovis.tech). Licensed under BSD 3-Clause
+(c) [Ilya Krukowski](https://bodrovis.tech). Licensed under BSD-3-Clause
