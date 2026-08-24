@@ -9,8 +9,6 @@ import (
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
 
-var jitteredBackoff = apierr.JitteredBackoff
-
 // WithExpBackoff runs op with retries using exponential backoff + jitter.
 // MaxRetries is the number of retries after the initial attempt.
 // If isRetryable is nil, apierr.IsRetryable is used.
@@ -30,8 +28,9 @@ func WithExpBackoff(
 	totalAttempts := maxRetries + 1
 	backoff := initialBackoff
 
-	timer := newStoppedTimer()
-	defer stopAndDrainTimer(timer)
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 
 	for attempt := 0; ; attempt++ {
 		if err := contextAttemptErr(ctx, label, attempt, totalAttempts); err != nil {
@@ -67,21 +66,6 @@ func resolveRetryable(fn func(error) bool) func(error) bool {
 	return apierr.IsRetryable
 }
 
-func newStoppedTimer() *time.Timer {
-	timer := time.NewTimer(time.Hour)
-	stopAndDrainTimer(timer)
-	return timer
-}
-
-func stopAndDrainTimer(timer *time.Timer) {
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
-}
-
 func contextAttemptErr(
 	ctx context.Context,
 	label string,
@@ -104,10 +88,11 @@ func shouldStopRetry(
 }
 
 func computeRetryDelay(backoff, maxBackoff time.Duration) time.Duration {
-	delay := jitteredBackoff(backoff)
+	delay := apierr.JitteredBackoff(backoff)
 	if delay <= 0 {
 		delay = time.Millisecond
 	}
+
 	if delay > maxBackoff {
 		delay = maxBackoff
 	}

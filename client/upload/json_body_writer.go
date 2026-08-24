@@ -4,15 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"io"
 	"os"
 )
-
-var openFile = func(name string) (io.ReadCloser, error) {
-	return os.Open(name)
-}
 
 func writeUploadJSON(w *bufio.Writer, params UploadParams, cleanPath string, spec uploadDataSpec) error {
 	// Manually build JSON to avoid buffering the whole payload in memory.
@@ -76,8 +72,10 @@ func writeUploadKV(w *bufio.Writer, k string, v any, first *bool) error {
 		return err
 	}
 
-	// json.Marshal(string) cannot fail
-	kb, _ := json.Marshal(k)
+	kb, err := json.Marshal(k)
+	if err != nil {
+		return err
+	}
 
 	vb, err := json.Marshal(v)
 	if err != nil {
@@ -110,25 +108,30 @@ func writeUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) err
 	enc := base64.NewEncoder(base64.StdEncoding, w)
 
 	_, err = io.Copy(enc, r)
+	err = joinErr(err, enc.Close())
+
 	if closeFn != nil {
 		err = joinErr(err, closeFn())
 	}
-	err = joinErr(err, enc.Close())
 
 	return err
 }
 
-func uploadDataReader(cleanPath string, spec uploadDataSpec) (io.Reader, func() error, error) {
-	// Select source for upload data.
+func uploadDataReader(
+	cleanPath string,
+	spec uploadDataSpec,
+) (io.Reader, func() error, error) {
 	switch {
 	case spec.useFile:
-		f, err := openFile(cleanPath)
+		f, err := os.Open(cleanPath)
 		if err != nil {
 			return nil, nil, err
 		}
 		return f, f.Close, nil
+
 	case spec.dataWasBytes:
 		return bytes.NewReader(spec.dataBytes), nil, nil
+
 	default:
 		return nil, nil, nil
 	}

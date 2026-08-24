@@ -63,6 +63,33 @@ func TestGetNumberAsInt(t *testing.T) {
 			ok:   true,
 		},
 		{
+			name: "numeric string",
+			m: map[string]any{
+				"status": "429",
+			},
+			key:  "status",
+			want: 429,
+			ok:   true,
+		},
+		{
+			name: "invalid numeric string",
+			m: map[string]any{
+				"status": "nope",
+			},
+			key:  "status",
+			want: 0,
+			ok:   false,
+		},
+		{
+			name: "fractional float64 rejected",
+			m: map[string]any{
+				"status": float64(429.5),
+			},
+			key:  "status",
+			want: 0,
+			ok:   false,
+		},
+		{
 			name: "int value",
 			m: map[string]any{
 				"status": 503,

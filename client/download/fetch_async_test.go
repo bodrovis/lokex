@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -155,33 +156,42 @@ func TestDownloader_FetchBundleAsync(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		httpmock.Activate()
-		defer httpmock.DeactivateAndReset()
+		synctest.Test(t, func(t *testing.T) {
+			httpmock.Activate()
+			defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", targetPost,
-			httpmock.NewStringResponder(200, `{"process_id":"xyz"}`))
+			httpmock.RegisterResponder(
+				"POST",
+				targetPost,
+				httpmock.NewStringResponder(200, `{"process_id":"xyz"}`),
+			)
 
-		// always queued, never finishes
-		httpmock.RegisterResponder("GET", targetGet, httpmock.NewStringResponder(200, `{
-			"process": {"process_id":"xyz","status":"queued"}
-		}`))
+			httpmock.RegisterResponder(
+				"GET",
+				targetGet,
+				httpmock.NewStringResponder(
+					200,
+					`{"process":{"process_id":"xyz","status":"queued"}}`,
+				),
+			)
 
-		cli, err := client.NewClient(token, projectID, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+			cli, err := client.NewClient(token, projectID, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-		d := download.NewDownloader(cli)
+			d := download.NewDownloader(cli)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
+			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+			defer cancel()
 
-		buf := mustJSONBody(t, map[string]any{"format": "json"})
+			buf := mustJSONBody(t, map[string]any{"format": "json"})
 
-		_, err = d.FetchBundleAsync(ctx, buf)
-		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("want context deadline, got %v", err)
-		}
+			_, err = d.FetchBundleAsync(ctx, buf)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("want context deadline, got %v", err)
+			}
+		})
 	})
 }
 
@@ -402,13 +412,10 @@ func TestDownloader_StartAsyncDownload(t *testing.T) {
 }
 
 func TestPollAsyncDownloadProcess(t *testing.T) {
+	t.Parallel()
+
 	t.Run("no process results returned", func(t *testing.T) {
-		restore := download.ExportSetPollProcessesForTest(
-			func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
-				return []background.QueuedProcess{}, nil
-			},
-		)
-		defer restore()
+		t.Parallel()
 
 		cli, err := client.NewClient(token, projectID, nil)
 		if err != nil {
@@ -417,26 +424,23 @@ func TestPollAsyncDownloadProcess(t *testing.T) {
 
 		d := download.NewDownloader(cli)
 
-		_, err = download.ExportPollAsyncDownloadProcess(d, context.Background(), "xyz")
+		_, err = download.ExportPollAsyncDownloadProcess(
+			d,
+			context.Background(),
+			"",
+		)
 		if err == nil {
 			t.Fatal("PollAsyncDownloadProcess() error = nil, want non-nil")
 		}
-		if err.Error() != "fetch bundle async: no process results returned (process_id=xyz)" {
-			t.Fatalf(
-				"error = %q, want %q",
-				err.Error(),
-				"fetch bundle async: no process results returned (process_id=xyz)",
-			)
+
+		want := "fetch bundle async: no process results returned (process_id=)"
+		if err.Error() != want {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
 		}
 	})
 
 	t.Run("poll processes error is wrapped", func(t *testing.T) {
-		restore := download.ExportSetPollProcessesForTest(
-			func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
-				return nil, errors.New("poll boom")
-			},
-		)
-		defer restore()
+		t.Parallel()
 
 		cli, err := client.NewClient(token, projectID, nil)
 		if err != nil {
@@ -445,16 +449,20 @@ func TestPollAsyncDownloadProcess(t *testing.T) {
 
 		d := download.NewDownloader(cli)
 
-		_, err = download.ExportPollAsyncDownloadProcess(d, context.Background(), "xyz")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err = download.ExportPollAsyncDownloadProcess(d, ctx, "xyz")
 		if err == nil {
 			t.Fatal("PollAsyncDownloadProcess() error = nil, want non-nil")
 		}
-		if err.Error() != "fetch bundle async: poll processes: poll boom" {
-			t.Fatalf(
-				"error = %q, want %q",
-				err.Error(),
-				"fetch bundle async: poll processes: poll boom",
-			)
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context.Canceled", err)
+		}
+
+		if !strings.Contains(err.Error(), "fetch bundle async: poll processes:") {
+			t.Fatalf("error = %q, want wrapped poll error", err.Error())
 		}
 	})
 }

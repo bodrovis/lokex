@@ -5,11 +5,12 @@ import (
 	"errors"
 	"reflect"
 	"strings"
-	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
+	"github.com/bodrovis/lokex/v2/client/internal/background"
 	"github.com/bodrovis/lokex/v2/client/upload"
 )
 
@@ -236,102 +237,6 @@ func TestAcquireBatchUploadSlot_ContextCanceled(t *testing.T) {
 	}
 }
 
-func TestUploader_UploadBatch_ConcurrencyFallbackToOneWhenNonPositive(t *testing.T) {
-	restoreConcurrency := upload.ExportSetBatchUploadConcurrencyForTest(0)
-	defer restoreConcurrency()
-
-	var started int32
-	enterCh := make(chan string, 2)
-	releaseCh := make(chan struct{})
-
-	restoreSingle := upload.ExportSetBatchUploadSingleForTest(
-		func(_ *upload.Uploader, _ context.Context, _ upload.UploadParams, srcPath string) (string, error) {
-			atomic.AddInt32(&started, 1)
-			enterCh <- srcPath
-			<-releaseCh
-			return srcPath + "-pid", nil
-		},
-	)
-	defer restoreSingle()
-
-	u := newTestUploader(t)
-
-	items := []upload.BatchUploadItem{
-		{
-			Params:  upload.UploadParams{"filename": "a.json", "data": "QQ=="},
-			SrcPath: "a.json",
-		},
-		{
-			Params:  upload.UploadParams{"filename": "b.json", "data": "Qg=="},
-			SrcPath: "b.json",
-		},
-	}
-
-	done := make(chan upload.BatchUploadResult, 1)
-	errCh := make(chan error, 1)
-
-	go func() {
-		got, err := u.UploadBatch(context.Background(), items, false)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		done <- got
-	}()
-
-	select {
-	case first := <-enterCh:
-		if first != "a.json" && first != "b.json" {
-			t.Fatalf("first started worker = %q, want one of input paths", first)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for first worker to start")
-	}
-
-	select {
-	case second := <-enterCh:
-		t.Fatalf("second worker %q started before first was released; want concurrency fallback to 1", second)
-	case <-time.After(150 * time.Millisecond):
-		// good
-	}
-
-	releaseCh <- struct{}{}
-
-	select {
-	case second := <-enterCh:
-		if second != "a.json" && second != "b.json" {
-			t.Fatalf("second started worker = %q, want one of input paths", second)
-		}
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for second worker after releasing first")
-	}
-
-	releaseCh <- struct{}{}
-
-	select {
-	case err := <-errCh:
-		t.Fatalf("UploadBatch() unexpected error = %v", err)
-	case got := <-done:
-		if len(got.Items) != 2 {
-			t.Fatalf("got.Items len = %d, want 2", len(got.Items))
-		}
-		for i, item := range got.Items {
-			if item.Err != nil {
-				t.Fatalf("item[%d].Err = %v, want nil", i, item.Err)
-			}
-			if item.ProcessID == "" {
-				t.Fatalf("item[%d].ProcessID is empty, want non-empty", i)
-			}
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for UploadBatch() to finish")
-	}
-
-	if got := atomic.LoadInt32(&started); got != 2 {
-		t.Fatalf("started workers = %d, want 2", got)
-	}
-}
-
 func TestUploader_UploadBatch_NoPoll(t *testing.T) {
 	restoreSingle := upload.ExportSetBatchUploadSingleForTest(
 		func(_ *upload.Uploader, _ context.Context, _ upload.UploadParams, srcPath string) (string, error) {
@@ -348,7 +253,7 @@ func TestUploader_UploadBatch_NoPoll(t *testing.T) {
 	defer restoreSingle()
 
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(context.Context, []string, *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
 			t.Fatal("pollProcessesFn was called, want no poll when poll=false")
 			return nil, nil
 		},
@@ -409,13 +314,13 @@ func TestUploader_UploadBatch_Poll_PartialSuccess(t *testing.T) {
 	defer restoreSingle()
 
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(_ context.Context, ids []string, _ *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(_ context.Context, ids []string, _ *client.Client) ([]background.QueuedProcess, error) {
 			wantIDs := []string{"p1", "p3"}
 			if !reflect.DeepEqual(ids, wantIDs) {
 				t.Fatalf("poll ids = %#v, want %#v", ids, wantIDs)
 			}
 
-			return []upload.ExportQueuedProcessForTest{
+			return []background.QueuedProcess{
 				{ProcessID: "p1", Status: "finished"},
 				{ProcessID: "p3", Status: "failed", Message: "bad format"},
 			}, nil
@@ -484,7 +389,7 @@ func TestUploader_UploadBatch_Poll_PropagatesPollErrorToAllStartedItems(t *testi
 	defer restoreSingle()
 
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(_ context.Context, ids []string, _ *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(_ context.Context, ids []string, _ *client.Client) ([]background.QueuedProcess, error) {
 			wantIDs := []string{"p1", "p2"}
 			if !reflect.DeepEqual(ids, wantIDs) {
 				t.Fatalf("poll ids = %#v, want %#v", ids, wantIDs)
@@ -532,12 +437,12 @@ func TestUploader_UploadBatch_Poll_MissingProcessResultMarksOnlyMissingOnes(t *t
 	defer restoreSingle()
 
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(_ context.Context, ids []string, _ *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(_ context.Context, ids []string, _ *client.Client) ([]background.QueuedProcess, error) {
 			wantIDs := []string{"p1", "p2"}
 			if !reflect.DeepEqual(ids, wantIDs) {
 				t.Fatalf("poll ids = %#v, want %#v", ids, wantIDs)
 			}
-			return []upload.ExportQueuedProcessForTest{
+			return []background.QueuedProcess{
 				{ProcessID: "p1", Status: "finished"},
 			}, nil
 		},
@@ -565,151 +470,148 @@ func TestUploader_UploadBatch_Poll_MissingProcessResultMarksOnlyMissingOnes(t *t
 	}
 }
 
-func TestUploader_UploadBatch_Poll_UsesInjectedStatusHandler(t *testing.T) {
+func TestUploader_UploadBatch_Poll_FailedProcess(t *testing.T) {
 	restoreSingle := upload.ExportSetBatchUploadSingleForTest(
-		func(_ *upload.Uploader, _ context.Context, _ upload.UploadParams, srcPath string) (string, error) {
+		func(
+			_ *upload.Uploader,
+			_ context.Context,
+			_ upload.UploadParams,
+			_ string,
+		) (string, error) {
 			return "p1", nil
 		},
 	)
 	defer restoreSingle()
 
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(_ context.Context, ids []string, _ *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(
+			_ context.Context,
+			ids []string,
+			_ *client.Client,
+		) ([]background.QueuedProcess, error) {
 			if !reflect.DeepEqual(ids, []string{"p1"}) {
 				t.Fatalf("poll ids = %#v, want %#v", ids, []string{"p1"})
 			}
-			return []upload.ExportQueuedProcessForTest{
-				{ProcessID: "p1", Status: "whatever", Message: "boom"},
+
+			return []background.QueuedProcess{
+				{
+					ProcessID: "p1",
+					Status:    background.StatusFailed,
+					Message:   "boom",
+				},
 			}, nil
 		},
 	)
 	defer restorePoll()
 
-	restoreStatus := upload.ExportSetBatchHandleProcessStatusForTest(
-		func(processID, status, message string) (string, error) {
-			if processID != "p1" {
-				t.Fatalf("processID = %q, want %q", processID, "p1")
-			}
-			if status != "whatever" {
-				t.Fatalf("status = %q, want %q", status, "whatever")
-			}
-			if message != "boom" {
-				t.Fatalf("message = %q, want %q", message, "boom")
-			}
-			return "", errors.New("custom status handler error")
-		},
-	)
-	defer restoreStatus()
-
 	u := newTestUploader(t)
 
-	got, err := u.UploadBatch(context.Background(), []upload.BatchUploadItem{
-		{Params: upload.UploadParams{"filename": "a.json", "data": "QQ=="}, SrcPath: "a.json"},
-	}, true)
+	got, err := u.UploadBatch(
+		context.Background(),
+		[]upload.BatchUploadItem{
+			{
+				Params: upload.UploadParams{
+					"filename": "a.json",
+					"data":     "QQ==",
+				},
+				SrcPath: "a.json",
+			},
+		},
+		true,
+	)
 	if err != nil {
 		t.Fatalf("UploadBatch() unexpected error = %v", err)
 	}
 
-	if got.Items[0].Err == nil || got.Items[0].Err.Error() != "custom status handler error" {
-		t.Fatalf("item[0].Err = %v, want %q", got.Items[0].Err, "custom status handler error")
+	if got.Items[0].Err == nil {
+		t.Fatal("item[0].Err = nil, want non-nil")
+	}
+
+	want := "upload: process p1 failed: boom"
+	if got.Items[0].Err.Error() != want {
+		t.Fatalf("item[0].Err = %q, want %q", got.Items[0].Err.Error(), want)
 	}
 }
 
 func TestUploader_UploadBatch_RespectsConcurrencyLimit(t *testing.T) {
-	restoreConcurrency := upload.ExportSetBatchUploadConcurrencyForTest(2)
-	defer restoreConcurrency()
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan string, 7)
+		release := make(chan struct{})
 
-	var current int32
-	var maxSeen int32
+		restoreSingle := upload.ExportSetBatchUploadSingleForTest(
+			func(
+				_ *upload.Uploader,
+				_ context.Context,
+				_ upload.UploadParams,
+				srcPath string,
+			) (string, error) {
+				started <- srcPath
+				<-release
+				return srcPath + "-pid", nil
+			},
+		)
+		defer restoreSingle()
 
-	started := make(chan string, 10)
-	release := make(chan struct{})
+		u := newTestUploader(t)
 
-	restoreSingle := upload.ExportSetBatchUploadSingleForTest(
-		func(_ *upload.Uploader, _ context.Context, _ upload.UploadParams, srcPath string) (string, error) {
-			n := atomic.AddInt32(&current, 1)
-			for {
-				prev := atomic.LoadInt32(&maxSeen)
-				if n <= prev {
-					break
-				}
-				if atomic.CompareAndSwapInt32(&maxSeen, prev, n) {
-					break
-				}
+		items := []upload.BatchUploadItem{
+			{Params: upload.UploadParams{"filename": "a.json"}, SrcPath: "a.json"},
+			{Params: upload.UploadParams{"filename": "b.json"}, SrcPath: "b.json"},
+			{Params: upload.UploadParams{"filename": "c.json"}, SrcPath: "c.json"},
+			{Params: upload.UploadParams{"filename": "d.json"}, SrcPath: "d.json"},
+			{Params: upload.UploadParams{"filename": "e.json"}, SrcPath: "e.json"},
+			{Params: upload.UploadParams{"filename": "f.json"}, SrcPath: "f.json"},
+			{Params: upload.UploadParams{"filename": "g.json"}, SrcPath: "g.json"},
+		}
+
+		done := make(chan upload.BatchUploadResult, 1)
+		errCh := make(chan error, 1)
+
+		go func() {
+			got, err := u.UploadBatch(t.Context(), items, false)
+			if err != nil {
+				errCh <- err
+				return
 			}
+			done <- got
+		}()
 
-			started <- srcPath
-			<-release
-			atomic.AddInt32(&current, -1)
-			return srcPath + "-pid", nil
-		},
-	)
-	defer restoreSingle()
-
-	u := newTestUploader(t)
-
-	items := []upload.BatchUploadItem{
-		{Params: upload.UploadParams{"filename": "a.json", "data": "QQ=="}, SrcPath: "a.json"},
-		{Params: upload.UploadParams{"filename": "b.json", "data": "Qg=="}, SrcPath: "b.json"},
-		{Params: upload.UploadParams{"filename": "c.json", "data": "Qw=="}, SrcPath: "c.json"},
-		{Params: upload.UploadParams{"filename": "d.json", "data": "RA=="}, SrcPath: "d.json"},
-		{Params: upload.UploadParams{"filename": "e.json", "data": "RQ=="}, SrcPath: "e.json"},
-	}
-
-	done := make(chan upload.BatchUploadResult, 1)
-	errCh := make(chan error, 1)
-
-	go func() {
-		got, err := u.UploadBatch(context.Background(), items, false)
-		if err != nil {
-			errCh <- err
-			return
+		// Exactly six workers may start.
+		for range 6 {
+			<-started
 		}
-		done <- got
-	}()
 
-	for i := 0; i < 2; i++ {
+		// Let all goroutines settle. The seventh must be blocked on the semaphore.
+		synctest.Wait()
+
 		select {
-		case <-started:
-		case <-time.After(1 * time.Second):
-			t.Fatalf("timed out waiting for started worker #%d", i+1)
+		case path := <-started:
+			t.Fatalf(
+				"worker %q started before a slot was released; concurrency limit broken",
+				path,
+			)
+		default:
 		}
-	}
 
-	select {
-	case third := <-started:
-		t.Fatalf("third worker %q started before a slot was released; concurrency limit broken", third)
-	case <-time.After(150 * time.Millisecond):
-		// good: only 2 workers started so far
-	}
-
-	release <- struct{}{}
-
-	select {
-	case <-started:
-		// good: third started only after releasing a slot
-	case <-time.After(1 * time.Second):
-		t.Fatal("timed out waiting for third worker after release")
-	}
-
-	for i := 0; i < len(items)-1; i++ {
+		// Free one slot; now the seventh worker must start.
 		release <- struct{}{}
-	}
+		<-started
 
-	select {
-	case err := <-errCh:
-		t.Fatalf("UploadBatch() unexpected error = %v", err)
-	case got := <-done:
-		if len(got.Items) != len(items) {
-			t.Fatalf("got.Items len = %d, want %d", len(got.Items), len(items))
+		// Release the six workers currently running.
+		for range 6 {
+			release <- struct{}{}
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for UploadBatch() to finish")
-	}
 
-	if got := atomic.LoadInt32(&maxSeen); got > 2 {
-		t.Fatalf("max concurrent uploads = %d, want <= 2", got)
-	}
+		select {
+		case err := <-errCh:
+			t.Fatalf("UploadBatch() unexpected error = %v", err)
+
+		case got := <-done:
+			if len(got.Items) != len(items) {
+				t.Fatalf("got.Items len = %d, want %d", len(got.Items), len(items))
+			}
+		}
+	})
 }
 
 func TestBatchUploadResult_Helpers(t *testing.T) {
@@ -852,12 +754,12 @@ func TestMarkBatchPollErrorForTest(t *testing.T) {
 
 func TestPollBatchResultsForTest_SkipsEmptyProcessIDFromPollResponse(t *testing.T) {
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(_ context.Context, ids []string, _ *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(_ context.Context, ids []string, _ *client.Client) ([]background.QueuedProcess, error) {
 			if !reflect.DeepEqual(ids, []string{"p1"}) {
 				t.Fatalf("poll ids = %#v, want %#v", ids, []string{"p1"})
 			}
 
-			return []upload.ExportQueuedProcessForTest{
+			return []background.QueuedProcess{
 				{ProcessID: "", Status: "failed", Message: "should be ignored"},
 				{ProcessID: "p1", Status: "finished"},
 			}, nil
@@ -883,12 +785,12 @@ func TestPollBatchResultsForTest_SkipsEmptyProcessIDFromPollResponse(t *testing.
 
 func TestPollBatchResultsForTest_SkipsUnknownProcessIDFromPollResponse(t *testing.T) {
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(_ context.Context, ids []string, _ *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(_ context.Context, ids []string, _ *client.Client) ([]background.QueuedProcess, error) {
 			if !reflect.DeepEqual(ids, []string{"p1"}) {
 				t.Fatalf("poll ids = %#v, want %#v", ids, []string{"p1"})
 			}
 
-			return []upload.ExportQueuedProcessForTest{
+			return []background.QueuedProcess{
 				{ProcessID: "unknown", Status: "failed", Message: "should be ignored"},
 				{ProcessID: "p1", Status: "finished"},
 			}, nil
@@ -914,7 +816,7 @@ func TestPollBatchResultsForTest_SkipsUnknownProcessIDFromPollResponse(t *testin
 
 func TestPollBatchResultsForTest_NoProcessIDs_ReturnsImmediately(t *testing.T) {
 	restorePoll := upload.ExportSetPollProcessesForTest(
-		func(context.Context, []string, *client.Client) ([]upload.ExportQueuedProcessForTest, error) {
+		func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
 			t.Fatal("pollProcessesFn was called, want no calls when there are no process ids")
 			return nil, nil
 		},
@@ -949,29 +851,6 @@ func TestPollBatchResultsForTest_NoProcessIDs_ReturnsImmediately(t *testing.T) {
 	}
 	if results[2].Err.Error() != "kickoff failed" {
 		t.Fatalf("results[2].Err = %v, want %q", results[2].Err, "kickoff failed")
-	}
-}
-
-func TestBatchUploadSingleFn_DefaultDelegatesToUploadSingle(t *testing.T) {
-	var u *upload.Uploader
-
-	got, err := upload.ExportCallBatchUploadSingleForTest(
-		u,
-		context.Background(),
-		upload.UploadParams{
-			"filename": "test.json",
-			"data":     "dGVzdA==",
-		},
-		"",
-	)
-	if err == nil {
-		t.Fatal("error = nil, want non-nil")
-	}
-	if err.Error() != "upload: uploader/client is nil" {
-		t.Fatalf("error = %q, want %q", err.Error(), "upload: uploader/client is nil")
-	}
-	if got != "" {
-		t.Fatalf("got = %q, want empty string", got)
 	}
 }
 

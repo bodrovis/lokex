@@ -5,46 +5,27 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bodrovis/lokex/v2/internal/zipx"
 )
 
 func TestExtractEntry(t *testing.T) {
-	t.Run("check parent symlinks error is returned", func(t *testing.T) {
-		restore := zipx.ExportSetPathHasSymlinkOutsideForTest(func(string, string) (bool, error) {
-			return false, errors.New("symlink boom")
-		})
-		defer restore()
+	t.Parallel()
 
-		tmpDir := t.TempDir()
-		zipPath := filepath.Join(tmpDir, "test.zip")
-		makeZipWithEntry(t, zipPath, "file.txt", []byte("abc"))
+	t.Run("special file mode is skipped", func(t *testing.T) {
+		t.Parallel()
 
-		zr, err := zip.OpenReader(zipPath)
+		destDir := t.TempDir()
+
+		root, err := os.OpenRoot(destDir)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer func() {
-			_ = zr.Close()
+			_ = root.Close()
 		}()
-
-		_, err = zipx.ExportExtractEntry(zr.File[0], tmpDir, tmpDir, zipx.DefaultPolicy())
-		if err == nil {
-			t.Fatal("ExtractEntry() error = nil, want non-nil")
-		}
-		if err.Error() != "symlink boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "symlink boom")
-		}
-	})
-
-	t.Run("special file mode is skipped", func(t *testing.T) {
-		restore := zipx.ExportSetPathHasSymlinkOutsideForTest(func(string, string) (bool, error) {
-			return false, nil
-		})
-		defer restore()
-
-		destDir := t.TempDir()
 
 		f := &zip.File{
 			FileHeader: zip.FileHeader{
@@ -54,146 +35,147 @@ func TestExtractEntry(t *testing.T) {
 		}
 		f.SetMode(os.ModeNamedPipe)
 
-		n, err := zipx.ExportExtractEntry(f, destDir, destDir, zipx.DefaultPolicy())
+		n, err := zipx.ExportExtractEntry(
+			f,
+			root,
+			zipx.DefaultPolicy(),
+		)
 		if err != nil {
 			t.Fatalf("ExtractEntry() unexpected error = %v", err)
 		}
+
 		if n != 0 {
-			t.Fatalf("n = %d, want %d", n, 0)
+			t.Fatalf("n = %d, want 0", n)
+		}
+
+		if _, err := root.Lstat("pipe"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("special entry was created: Lstat() error = %v", err)
 		}
 	})
 }
 
 func TestPrepareEntryTarget(t *testing.T) {
+	t.Parallel()
+
 	t.Run("empty normalized path is skipped", func(t *testing.T) {
+		t.Parallel()
+
 		f := &zip.File{
 			FileHeader: zip.FileHeader{
-				Name: "/",
+				Name: ".",
 			},
 		}
 
-		targetAbs, info, mode, skip, err := zipx.ExportPrepareEntryTarget(
+		rel, mode, skip, err := zipx.ExportPrepareEntryTarget(
 			f,
-			t.TempDir(),
-			t.TempDir(),
 			zipx.DefaultPolicy(),
 		)
 		if err != nil {
 			t.Fatalf("PrepareEntryTarget() unexpected error = %v", err)
 		}
-		if targetAbs != "" {
-			t.Fatalf("targetAbs = %q, want empty", targetAbs)
+
+		if rel != "" {
+			t.Fatalf("rel = %q, want empty", rel)
 		}
-		if info != nil {
-			t.Fatalf("info = %#v, want nil", info)
-		}
+
 		if mode != 0 {
 			t.Fatalf("mode = %v, want 0", mode)
 		}
+
 		if !skip {
 			t.Fatal("skip = false, want true")
 		}
 	})
 
-	t.Run("resolve target path error is returned", func(t *testing.T) {
-		destDir := t.TempDir()
-		destReal := t.TempDir() // intentionally different root
+	t.Run("unsafe path is rejected", func(t *testing.T) {
+		t.Parallel()
 
-		f := &zip.File{
-			FileHeader: zip.FileHeader{
-				Name: "file.txt",
-			},
-		}
-
-		_, _, _, skip, err := zipx.ExportPrepareEntryTarget(
-			f,
-			destDir,
-			destReal,
-			zipx.DefaultPolicy(),
-		)
-		if err == nil {
-			t.Fatal("PrepareEntryTarget() error = nil, want non-nil")
-		}
-		if skip {
-			t.Fatal("skip = true, want false")
-		}
-	})
-
-	t.Run("resolve target path error is returned", func(t *testing.T) {
 		f := &zip.File{
 			FileHeader: zip.FileHeader{
 				Name: "../evil.txt",
 			},
 		}
 
-		_, _, _, skip, err := zipx.ExportPrepareEntryTarget(
+		_, _, skip, err := zipx.ExportPrepareEntryTarget(
 			f,
-			t.TempDir(),
-			t.TempDir(),
 			zipx.DefaultPolicy(),
 		)
+
 		if err == nil {
 			t.Fatal("PrepareEntryTarget() error = nil, want non-nil")
 		}
+
 		if skip {
 			t.Fatal("skip = true, want false")
+		}
+	})
+
+	t.Run("file exceeding header limit is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		f := &zip.File{
+			FileHeader: zip.FileHeader{
+				Name:               "large.bin",
+				UncompressedSize64: 101,
+			},
+		}
+
+		p := zipx.DefaultPolicy()
+		p.MaxFileBytes = 100
+
+		_, _, skip, err := zipx.ExportPrepareEntryTarget(f, p)
+
+		if err == nil {
+			t.Fatal("PrepareEntryTarget() error = nil, want non-nil")
+		}
+
+		if skip {
+			t.Fatal("skip = true, want false")
+		}
+
+		if !strings.Contains(err.Error(), "zip entry too big by header") {
+			t.Fatalf("error = %q, want size limit error", err.Error())
 		}
 	})
 }
 
 func TestExtractDirEntry(t *testing.T) {
-	t.Run("mkdir all error is returned", func(t *testing.T) {
-		restore := zipx.ExportSetMkdirAllDirForTest(func(string, os.FileMode) error {
-			return errors.New("mkdir boom")
-		})
-		defer restore()
+	t.Parallel()
 
-		f := &zip.File{
-			FileHeader: zip.FileHeader{
-				Name: "dir/",
-			},
-		}
+	destDir := t.TempDir()
 
-		err := zipx.ExportExtractDirEntry(f, filepath.Join(t.TempDir(), "dir"), zipx.DefaultPolicy())
-		if err == nil {
-			t.Fatal("ExtractDirEntry() error = nil, want non-nil")
-		}
-		if err.Error() != "mkdir boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "mkdir boom")
-		}
-	})
-}
+	// Make "blocked" a regular file, so creating blocked/dir must fail.
+	if err := os.WriteFile(
+		filepath.Join(destDir, "blocked"),
+		[]byte("x"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
 
-func TestCheckParentSymlinks(t *testing.T) {
-	t.Run("unsafe parent symlink returns error", func(t *testing.T) {
-		restore := zipx.ExportSetPathHasSymlinkOutsideForTest(func(string, string) (bool, error) {
-			return true, nil
-		})
-		defer restore()
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = root.Close()
+	}()
 
-		err := zipx.ExportCheckParentSymlinks("/dest", "/dest/file.txt", "file.txt")
-		if err == nil {
-			t.Fatal("CheckParentSymlinks() error = nil, want non-nil")
-		}
-		if err.Error() != `unsafe symlink in parents for: "file.txt"` {
-			t.Fatalf("error = %q, want %q", err.Error(), `unsafe symlink in parents for: "file.txt"`)
-		}
-	})
+	f := &zip.File{
+		FileHeader: zip.FileHeader{
+			Name: "blocked/dir/",
+		},
+	}
 
-	t.Run("non not-exist error is returned", func(t *testing.T) {
-		restore := zipx.ExportSetPathHasSymlinkOutsideForTest(func(string, string) (bool, error) {
-			return false, errors.New("path boom")
-		})
-		defer restore()
-
-		err := zipx.ExportCheckParentSymlinks("/dest", "/dest/file.txt", "file.txt")
-		if err == nil {
-			t.Fatal("CheckParentSymlinks() error = nil, want non-nil")
-		}
-		if err.Error() != "path boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "path boom")
-		}
-	})
+	err = zipx.ExportExtractDirEntry(
+		f,
+		root,
+		"blocked/dir",
+		zipx.DefaultPolicy(),
+	)
+	if err == nil {
+		t.Fatal("ExtractDirEntry() error = nil, want non-nil")
+	}
 }
 
 func makeZipWithEntry(t *testing.T, zipPath, name string, data []byte) {

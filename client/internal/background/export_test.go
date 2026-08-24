@@ -20,10 +20,6 @@ func ExportApplyRound(
 	applyRound(processMap, pending, procs, errs)
 }
 
-func ExportNewStoppedTimer() *time.Timer {
-	return newStoppedTimer()
-}
-
 func ExportNextSleepWait(wait time.Duration, deadline time.Time) (time.Duration, bool) {
 	return nextSleepWait(wait, deadline)
 }
@@ -44,34 +40,6 @@ func ExportSetPollRoundForTest(
 	pollRoundFn = fn
 	return func() {
 		pollRoundFn = prev
-	}
-}
-
-func ExportSetNewTimerForTest(fn func(time.Duration) *time.Timer) func() {
-	prev := newTimer
-	newTimer = fn
-	return func() {
-		newTimer = prev
-	}
-}
-
-func ExportSetSleepWithTimerForTest(
-	fn func(context.Context, *time.Timer, time.Duration) error,
-) func() {
-	prev := sleepWithTimer
-	sleepWithTimer = fn
-	return func() {
-		sleepWithTimer = prev
-	}
-}
-
-func ExportSetNextSleepWaitForTest(
-	fn func(time.Duration, time.Time) (time.Duration, bool),
-) func() {
-	prev := nextSleepWaitFn
-	nextSleepWaitFn = fn
-	return func() {
-		nextSleepWaitFn = prev
 	}
 }
 

@@ -1,7 +1,6 @@
 package apierr_test
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -253,8 +252,8 @@ func TestParse_TopLevelShape_ErrorNotString_FallsBack(t *testing.T) {
 	if e.Status != st {
 		t.Fatalf("Status=%d want %d", e.Status, st)
 	}
-	if e.Code != 0 {
-		t.Fatalf("Code=%d want 0", e.Code)
+	if e.Code != 400 {
+		t.Fatalf("Code=%d want 400", e.Code)
 	}
 	if e.Message != "oops" {
 		t.Fatalf("Message=%q want %q", e.Message, "oops")
@@ -346,20 +345,13 @@ func TestParse_EmptyBody(t *testing.T) {
 // helper
 func wantInt1(t *testing.T, v any, field string) {
 	t.Helper()
-	switch x := v.(type) {
-	case float64:
-		if int(x) != 1 {
-			t.Fatalf("%s=%v want 1 (float64)", field, v)
-		}
-	case json.Number:
-		if x.String() != "1" {
-			t.Fatalf("%s=%v want 1 (json.Number)", field, v)
-		}
-	case string:
-		if x != "1" {
-			t.Fatalf("%s=%q want \"1\" (string)", field, x)
-		}
-	default:
-		t.Fatalf("%s has unexpected type %T (value=%v); want number-like 1", field, v, v)
+
+	x, ok := v.(float64)
+	if !ok {
+		t.Fatalf("%s has unexpected type %T (value=%v); want float64", field, v, v)
+	}
+
+	if x != 1 {
+		t.Fatalf("%s=%v want 1", field, v)
 	}
 }

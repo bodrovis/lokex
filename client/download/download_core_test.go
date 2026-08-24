@@ -1,9 +1,8 @@
 package download_test
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -44,7 +43,10 @@ func TestDownloader_Download_SyncFlow(t *testing.T) {
 	// POST → bundle_url
 	httpmock.RegisterResponder("POST", postURL, func(req *http.Request) (*http.Response, error) {
 		var got map[string]any
-		_ = json.NewDecoder(req.Body).Decode(&got)
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+
 		if got["format"] != "json" {
 			t.Fatalf("format = %v, want json", got["format"])
 		}
@@ -647,34 +649,38 @@ func TestDownloader_DoDownload_EmptyParams(t *testing.T) {
 }
 
 func TestDownloader_DoDownload_EncodeJSONBodyError(t *testing.T) {
-	restore := download.ExportSetEncodeJSONBodyForTest(
-		func(v any) (*bytes.Reader, error) {
-			return nil, errors.New("encode boom")
-		},
-	)
-	defer restore()
-
 	cli, err := client.NewClient(token, projectID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	d := download.NewDownloader(cli)
 
 	got, err := download.ExportDoDownload(
 		d,
 		context.Background(),
 		t.TempDir(),
-		download.DownloadParams{"format": "json"},
+		download.DownloadParams{
+			"bad": func() {},
+		},
 		func(context.Context, io.Reader) (string, error) {
-			return "https://example.com/bundle.zip", nil
+			t.Fatal("fetch called after JSON encoding failed")
+			return "", nil
 		},
 	)
+
 	if err == nil {
 		t.Fatal("DoDownload() error = nil, want non-nil")
 	}
-	if err.Error() != "download: encode boom" {
-		t.Fatalf("error = %q, want %q", err.Error(), "download: encode boom")
+
+	if !strings.Contains(err.Error(), "download: encode body:") {
+		t.Fatalf("error = %q, want wrapped encode error", err.Error())
 	}
+
+	if !strings.Contains(err.Error(), "marshal from Go func()") {
+		t.Fatalf("error = %q, want marshal error", err.Error())
+	}
+
 	if got != "" {
 		t.Fatalf("got = %q, want empty string on error", got)
 	}

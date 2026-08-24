@@ -91,6 +91,14 @@ func (r *closeTrackingReader) Close() error {
 	return nil
 }
 
+type plainReader struct {
+	r io.Reader
+}
+
+func (r plainReader) Read(p []byte) (int, error) {
+	return r.r.Read(p)
+}
+
 func TestDoWithRetry(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +117,113 @@ func TestDoWithRetry(t *testing.T) {
 		}
 		if err.Error() != "retry request: nil op" {
 			t.Fatalf("error = %q, want %q", err.Error(), "retry request: nil op")
+		}
+	})
+
+	t.Run("closes body when buffering fails", func(t *testing.T) {
+		t.Parallel()
+
+		closed := false
+		readErr := errors.New("read boom")
+
+		body := &closeTrackingReader{
+			r:      errReader{err: readErr},
+			closed: &closed,
+		}
+
+		attemptOp, err := retry.ExportAttemptOpFromBufferedBody(
+			body,
+			func(int, io.Reader) error { return nil },
+		)
+
+		if !errors.Is(err, readErr) {
+			t.Fatalf("error = %v, want %v", err, readErr)
+		}
+		if attemptOp != nil {
+			t.Fatal("attemptOp != nil, want nil")
+		}
+		if !closed {
+			t.Fatal("body was not closed after buffering failed")
+		}
+	})
+
+	t.Run("factory body creation error is returned", func(t *testing.T) {
+		t.Parallel()
+
+		bodyErr := errors.New("cannot create body")
+
+		body := testRetryBodyFactory{
+			newBody: func() (io.ReadCloser, error) {
+				return nil, bodyErr
+			},
+		}
+
+		attemptOp, cleanup, err := retry.ExportMakeAttemptOp(
+			body,
+			func(int, io.Reader) error { return nil },
+		)
+		if err != nil {
+			t.Fatalf("MakeAttemptOp() unexpected error = %v", err)
+		}
+		if cleanup != nil {
+			t.Fatal("cleanup != nil, want nil")
+		}
+
+		err = attemptOp(0)
+		if !errors.Is(err, bodyErr) {
+			t.Fatalf("error = %v, want %v", err, bodyErr)
+		}
+		if err.Error() != "create request body: cannot create body" {
+			t.Fatalf("error = %q", err.Error())
+		}
+	})
+
+	t.Run("read seeker is rewound for each retry and closed once", func(t *testing.T) {
+		t.Parallel()
+
+		closed := false
+		body := &testReadSeekCloser{
+			Reader: strings.NewReader("payload"),
+			closed: &closed,
+		}
+
+		attempts := 0
+
+		err := retry.DoWithRetry(
+			context.Background(),
+			retry.Config{
+				MaxRetries:     1,
+				InitialBackoff: time.Nanosecond,
+				MaxBackoff:     time.Nanosecond,
+			},
+			body,
+			func(attempt int, rdr io.Reader) error {
+				attempts++
+
+				b, err := io.ReadAll(rdr)
+				if err != nil {
+					return err
+				}
+				if string(b) != "payload" {
+					t.Fatalf("attempt %d body = %q, want %q", attempt, b, "payload")
+				}
+
+				if attempt == 0 {
+					return errors.New("retry me")
+				}
+				return nil
+			},
+			func(error) bool { return true },
+		)
+
+		if err != nil {
+			t.Fatalf("DoWithRetry() error = %v", err)
+		}
+		if attempts != 2 {
+			t.Fatalf("attempts = %d, want 2", attempts)
+		}
+		if !closed {
+			t.Fatal("body was not closed")
 		}
 	})
 
@@ -224,22 +339,30 @@ func TestMakeAttemptOp(t *testing.T) {
 	t.Run("uses buffered body fallback", func(t *testing.T) {
 		t.Parallel()
 
+		body := plainReader{
+			r: strings.NewReader("buffered-body"),
+		}
+
 		attemptOp, cleanup, err := retry.ExportMakeAttemptOp(
-			strings.NewReader("buffered-body"),
+			body,
 			func(_ int, rdr io.Reader) error {
 				b, err := io.ReadAll(rdr)
 				if err != nil {
 					return err
 				}
+
 				if string(b) != "buffered-body" {
 					t.Fatalf("body = %q, want %q", string(b), "buffered-body")
 				}
+
 				return nil
 			},
 		)
+
 		if err != nil {
 			t.Fatalf("MakeAttemptOp() unexpected error = %v", err)
 		}
+
 		if cleanup != nil {
 			t.Fatal("cleanup != nil, want nil for buffered body")
 		}

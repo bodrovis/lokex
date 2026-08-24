@@ -1,6 +1,6 @@
 package background
 
-// buildResults reconstructs output preserving caller order and duplicates.
+// buildResults reconstructs the output in caller order, preserving duplicates.
 // Empty IDs are skipped.
 func buildResults(ordered []string, processMap map[string]QueuedProcess) []QueuedProcess {
 	out := make([]QueuedProcess, 0, len(ordered))

@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-func contains(s, sub string) bool { return strings.Contains(s, sub) }
-
 type zentry struct {
 	name     string
 	data     []byte
@@ -29,7 +27,7 @@ func makeZip(t *testing.T, entries []zentry) string {
 	zw := zip.NewWriter(f)
 	for _, e := range entries {
 		name := e.name
-		if e.isDir && name[len(name)-1] != '/' {
+		if e.isDir && !strings.HasSuffix(name, "/") {
 			name += "/"
 		}
 		h := &zip.FileHeader{

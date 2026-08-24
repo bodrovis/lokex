@@ -1,26 +1,22 @@
-// Package utils holds small helpers shared across the client.
 package utils
 
 import (
 	"bytes"
-	"encoding/json"
+	json "encoding/json/v2"
 	"fmt"
 )
 
-// EncodeJSONBody JSON-encodes body into a bytes.Buffer suitable for HTTP requests.
+// EncodeJSONBody JSON-encodes body into a bytes.Reader suitable for HTTP requests.
+//
 // Notes:
-//   - HTML escaping is disabled (e.g., "<" won't become "\u003c") so payloads
-//     stay human-readable and match external API expectations.
-//   - json.Encoder.Encode appends a trailing newline; that's fine for HTTP bodies.
-//   - On encode errors (e.g., unsupported values), returns a wrapped error.
+//   - JSON strings use minimal escaping, so HTML characters such as "<" are
+//     not escaped unnecessarily.
+//   - On marshal errors (e.g. unsupported values), returns a wrapped error.
 func EncodeJSONBody(body any) (*bytes.Reader, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(body); err != nil {
+	data, err := json.Marshal(body)
+	if err != nil {
 		return nil, fmt.Errorf("encode body: %w", err)
 	}
 
-	// bytes.Reader умеет Seek, и он читает из слайса без доп. копии
-	return bytes.NewReader(buf.Bytes()), nil
+	return bytes.NewReader(data), nil
 }

@@ -165,21 +165,16 @@ func TestDownloadOnce_PrecheckErrorIsReturned(t *testing.T) {
 
 func TestDownloadOnce(t *testing.T) {
 	t.Run("do download request error is returned", func(t *testing.T) {
-		restore := download.ExportSetDoDownloadRequestForTest(
-			func(
-				_ *download.Downloader,
-				_ context.Context,
-				_ *http.Client,
-				_ string,
-				_ string,
-			) (*http.Response, error) {
-				return nil, errors.New("request boom")
-			},
-		)
-		defer restore()
+		t.Parallel()
+
+		errBoom := errors.New("request boom")
 
 		d := download.NewDownloader(&client.Client{
-			HTTPClient: &http.Client{},
+			HTTPClient: &http.Client{
+				Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					return nil, errBoom
+				}),
+			},
 		})
 
 		destPath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -191,11 +186,19 @@ func TestDownloadOnce(t *testing.T) {
 			destPath,
 			"test-ua",
 		)
+
 		if err == nil {
 			t.Fatal("DownloadOnce() error = nil, want non-nil")
 		}
-		if err.Error() != "request boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "request boom")
+
+		if !errors.Is(err, errBoom) {
+			t.Fatalf("error = %v, want request boom", err)
 		}
 	})
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

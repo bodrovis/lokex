@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -235,40 +236,48 @@ func TestDownloadAndUnzip_RetryStopsAtMax(t *testing.T) {
 }
 
 func TestDownloadAndUnzip_BackoffCanceledByContext(t *testing.T) {
-	httpmock.Activate()
-	defer httpmock.DeactivateAndReset()
+	synctest.Test(t, func(t *testing.T) {
+		httpmock.Activate()
+		defer httpmock.DeactivateAndReset()
 
-	url := "https://cdn.example.com/flaky-cancel.zip"
-	httpmock.RegisterResponder("GET", url, httpmock.NewStringResponder(500, "boom"))
+		url := "https://cdn.example.com/flaky-cancel.zip"
+		httpmock.RegisterResponder(
+			"GET",
+			url,
+			httpmock.NewStringResponder(500, "boom"),
+		)
 
-	cli, err := client.NewClient(token, projectID, client.WithBackoff(
-		50*time.Millisecond,
-		100*time.Millisecond,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
+		cli, err := client.NewClient(
+			token,
+			projectID,
+			client.WithBackoff(
+				50*time.Millisecond,
+				100*time.Millisecond,
+			),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	dl := download.NewDownloader(cli)
+		dl := download.NewDownloader(cli)
+		dest := t.TempDir()
 
-	dest := t.TempDir()
-	ctx, cancel := context.WithCancel(context.Background())
-	// cancel shortly after the first failing attempt; should exit during backoff sleep
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		cancel()
-	}()
+		ctx, cancel := context.WithCancel(t.Context())
 
-	err = dl.DownloadAndUnzip(ctx, url, dest)
-	if err == nil || !errors.Is(err, context.Canceled) {
-		t.Fatalf("want context canceled, got %v", err)
-	}
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
 
-	// since we canceled during backoff, only the first request should have happened
-	info := httpmock.GetCallCountInfo()
-	if got := info["GET "+url]; got != 1 {
-		t.Fatalf("attempts=%d, want 1", got)
-	}
+		err = dl.DownloadAndUnzip(ctx, url, dest)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context canceled, got %v", err)
+		}
+
+		if got := httpmock.GetCallCountInfo()["GET "+url]; got != 1 {
+			t.Fatalf("attempts=%d, want 1", got)
+		}
+	})
 }
 
 func TestDownloadAndUnzip_ContextCanceled(t *testing.T) {

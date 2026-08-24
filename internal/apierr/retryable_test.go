@@ -23,24 +23,40 @@ type mockNetErr struct {
 func (m mockNetErr) Error() string { return m.msg }
 func (m mockNetErr) Timeout() bool { return m.timeout }
 
-func TestIsRetryable_NetError(t *testing.T) {
-	timeoutErr := mockNetErr{msg: "i/o timeout", timeout: true}
-	nonTimeoutErr := mockNetErr{msg: "conn refused", timeout: false}
+func TestIsRetryable_TimeoutError(t *testing.T) {
+	t.Parallel()
+
+	timeoutErr := mockNetErr{
+		msg:     "i/o timeout",
+		timeout: true,
+	}
+	nonTimeoutErr := mockNetErr{
+		msg:     "conn refused",
+		timeout: false,
+	}
 
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
-		{"net timeout", timeoutErr, true},
-		{"wrapped net timeout", fmt.Errorf("wrap: %w", timeoutErr), true},
-		{"net non-timeout", nonTimeoutErr, false},
+		{"timeout", timeoutErr, true},
+		{"wrapped timeout", fmt.Errorf("wrap: %w", timeoutErr), true},
+		{"non-timeout", nonTimeoutErr, false},
 	}
+
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			got := apierr.IsRetryable(tc.err)
 			if got != tc.want {
-				t.Fatalf("IsRetryable(%T) = %v, want %v", tc.err, got, tc.want)
+				t.Fatalf(
+					"IsRetryable(%T) = %v, want %v",
+					tc.err,
+					got,
+					tc.want,
+				)
 			}
 		})
 	}
@@ -87,21 +103,6 @@ func TestIsRetryable_APIStatuses(t *testing.T) {
 	}
 }
 
-func TestIsRetryable_FlakyIO(t *testing.T) {
-	errs := []error{
-		io.ErrUnexpectedEOF,
-		io.EOF,
-		io.ErrClosedPipe,
-		syscall.ECONNRESET,
-		syscall.ECONNABORTED,
-	}
-	for _, e := range errs {
-		if !apierr.IsRetryable(e) {
-			t.Fatalf("expected retryable for %v", e)
-		}
-	}
-}
-
 func TestIsRetryable_ContextErrorsAreNotRetryable(t *testing.T) {
 	if apierr.IsRetryable(context.Canceled) {
 		t.Fatalf("context.Canceled should not be retryable")
@@ -111,15 +112,17 @@ func TestIsRetryable_ContextErrorsAreNotRetryable(t *testing.T) {
 	}
 }
 
-func TestIsRetryable_RealNetTimeoutSatisfies(t *testing.T) {
-	// Attempt a dial that should time out immediately; envs vary, so allow skip.
-	d := net.Dialer{Timeout: 1 * time.Nanosecond}
-	_, err := d.Dial("tcp", "203.0.113.1:81") // TEST-NET-3 (RFC 5737)
-	if err == nil {
-		t.Skip("unexpectedly connected; skip environment-specific test")
+func TestIsRetryable_NetOpTimeoutTakesPrecedenceOverContextDeadline(t *testing.T) {
+	t.Parallel()
+
+	err := &net.OpError{
+		Op:  "dial",
+		Net: "tcp",
+		Err: context.DeadlineExceeded,
 	}
-	if !apierr.IsRetryable(err) && !apierr.IsRetryable(fmt.Errorf("wrap: %w", err)) {
-		t.Fatalf("IsRetryable(net timeout-like) = false, want true")
+
+	if !apierr.IsRetryable(err) {
+		t.Fatal("IsRetryable(net.OpError deadline) = false, want true")
 	}
 }
 
@@ -133,19 +136,69 @@ func TestIsRetryable_NilAndUnknownErrors(t *testing.T) {
 }
 
 func TestJitteredBackoff_BoundsAndDefault(t *testing.T) {
-	// default when base <= 0
-	if d := apierr.JitteredBackoff(0); d <= 0 {
-		t.Fatalf("expected positive default, got %v", d)
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		base time.Duration
+		want time.Duration
+	}{
+		{
+			name: "positive base",
+			base: 200 * time.Millisecond,
+			want: 200 * time.Millisecond,
+		},
+		{
+			name: "zero uses default",
+			base: 0,
+			want: 300 * time.Millisecond,
+		},
+		{
+			name: "negative uses default",
+			base: -time.Second,
+			want: 300 * time.Millisecond,
+		},
 	}
 
-	base := 200 * time.Millisecond
-	min := base / 2
-	max := time.Duration(float64(base) * 1.5)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 
-	for i := range 200 {
-		got := apierr.JitteredBackoff(base)
-		if got < min || got >= max {
-			t.Fatalf("backoff %v out of range [%v, %v) (iteration %d)", got, min, max, i)
+			min := tt.want / 2
+			max := tt.want + tt.want/2
+
+			for i := range 200 {
+				got := apierr.JitteredBackoff(tt.base)
+
+				if got < min || got >= max {
+					t.Fatalf(
+						"backoff %v out of range [%v, %v) (iteration %d)",
+						got,
+						min,
+						max,
+						i,
+					)
+				}
+			}
+		})
+	}
+}
+
+func TestIsRetryable_FlakyIO(t *testing.T) {
+	t.Parallel()
+
+	errs := []error{
+		io.ErrUnexpectedEOF,
+		io.EOF,
+		io.ErrClosedPipe,
+		syscall.ECONNRESET,
+		syscall.EPIPE,
+		syscall.ECONNABORTED,
+	}
+
+	for _, err := range errs {
+		if !apierr.IsRetryable(err) {
+			t.Fatalf("IsRetryable(%v) = false, want true", err)
 		}
 	}
 }

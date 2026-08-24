@@ -2,6 +2,7 @@ package upload_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -28,6 +29,88 @@ func TestPollUntilFinished(t *testing.T) {
 		}
 		if got != "" {
 			t.Fatalf("got = %q, want empty string on error", got)
+		}
+	})
+
+	t.Run("poll error is wrapped", func(t *testing.T) {
+		pollErr := errors.New("poll boom")
+
+		restore := upload.ExportSetPollProcessesForTest(
+			func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error) {
+				return nil, pollErr
+			},
+		)
+		defer restore()
+
+		c, err := client.NewClient("123", "abc")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		u := upload.NewUploader(c)
+
+		got, err := upload.ExportPollUntilFinished(
+			u,
+			context.Background(),
+			"pid-1",
+		)
+
+		if !errors.Is(err, pollErr) {
+			t.Fatalf("error = %v, want wrapped poll error", err)
+		}
+
+		if err.Error() != "upload: poll processes: poll boom" {
+			t.Fatalf(
+				"error = %q, want %q",
+				err.Error(),
+				"upload: poll processes: poll boom",
+			)
+		}
+
+		if got != "" {
+			t.Fatalf("got = %q, want empty string", got)
+		}
+	})
+
+	t.Run("finished process returns process id", func(t *testing.T) {
+		restore := upload.ExportSetPollProcessesForTest(
+			func(
+				_ context.Context,
+				processIDs []string,
+				_ *client.Client,
+			) ([]background.QueuedProcess, error) {
+				if len(processIDs) != 1 || processIDs[0] != "pid-1" {
+					t.Fatalf("processIDs = %v, want [pid-1]", processIDs)
+				}
+
+				return []background.QueuedProcess{
+					{
+						ProcessID: "pid-1",
+						Status:    background.StatusFinished,
+					},
+				}, nil
+			},
+		)
+		defer restore()
+
+		c, err := client.NewClient("123", "abc")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		u := upload.NewUploader(c)
+
+		got, err := upload.ExportPollUntilFinished(
+			u,
+			context.Background(),
+			"  pid-1  ",
+		)
+		if err != nil {
+			t.Fatalf("PollUntilFinished() error = %v", err)
+		}
+
+		if got != "pid-1" {
+			t.Fatalf("got = %q, want %q", got, "pid-1")
 		}
 	})
 

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"io"
-	"os"
 
 	"github.com/bodrovis/lokex/v2/client"
 	"github.com/bodrovis/lokex/v2/client/internal/background"
@@ -30,14 +29,6 @@ func ExportEnsureFileIsRegular(readPath string) error {
 	return ensureFileIsRegular(readPath)
 }
 
-func ExportSetStatFileForTest(fn func(string) (os.FileInfo, error)) func() {
-	prev := statFile
-	statFile = fn
-	return func() {
-		statFile = prev
-	}
-}
-
 func ExportWriteUploadJSON(w *bufio.Writer, params UploadParams, cleanPath string, spec uploadDataSpec) error {
 	return writeUploadJSON(w, params, cleanPath, spec)
 }
@@ -48,14 +39,6 @@ func ExportWriteUploadKV(w *bufio.Writer, k string, v any, first *bool) error {
 
 func ExportWriteUploadData(w *bufio.Writer, cleanPath string, spec uploadDataSpec) error {
 	return writeUploadData(w, cleanPath, spec)
-}
-
-func ExportSetOpenFileForTest(fn func(string) (io.ReadCloser, error)) func() {
-	prev := openFile
-	openFile = fn
-	return func() {
-		openFile = prev
-	}
 }
 
 func ExportUploadDataSpecForTest(
@@ -99,12 +82,6 @@ func ExportSetKickoffUploadStreamingForTest(
 	}
 }
 
-func ExportUploadBodyFactoryReadForTest() (int, error) {
-	var f uploadBodyFactory
-	buf := make([]byte, 1)
-	return f.Read(buf)
-}
-
 func ExportSetBatchUploadSingleForTest(
 	fn func(u *Uploader, ctx context.Context, params UploadParams, srcPath string) (string, error),
 ) func() {
@@ -115,18 +92,8 @@ func ExportSetBatchUploadSingleForTest(
 	}
 }
 
-func ExportSetBatchUploadConcurrencyForTest(n int) func() {
-	prev := batchUploadConcurrency
-	batchUploadConcurrency = n
-	return func() {
-		batchUploadConcurrency = prev
-	}
-}
-
-type ExportQueuedProcessForTest = background.QueuedProcess
-
 func ExportSetPollProcessesForTest(
-	fn func(context.Context, []string, *client.Client) ([]ExportQueuedProcessForTest, error),
+	fn func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error),
 ) func() {
 	prev := pollProcessesFn
 	pollProcessesFn = func(ctx context.Context, ids []string, c *client.Client) ([]background.QueuedProcess, error) {
@@ -159,16 +126,6 @@ func ExportMarkBatchPollErrorForTest(
 	markBatchPollError(results, processIDs, idToIndexes, err)
 }
 
-func ExportSetBatchHandleProcessStatusForTest(
-	fn func(processID, status, message string) (string, error),
-) func() {
-	prev := batchHandleProcessStatusFn
-	batchHandleProcessStatusFn = fn
-	return func() {
-		batchHandleProcessStatusFn = prev
-	}
-}
-
 func ExportPollBatchResultsForTest(
 	u *Uploader,
 	ctx context.Context,
@@ -185,15 +142,6 @@ func ExportReleaseBatchUploadSlotForTest(sem chan struct{}) {
 	releaseBatchUploadSlot(sem)
 }
 
-func ExportCallBatchUploadSingleForTest(
-	u *Uploader,
-	ctx context.Context,
-	params UploadParams,
-	srcPath string,
-) (string, error) {
-	return batchUploadSingleFn(u, ctx, params, srcPath)
-}
-
 func ExportKickoffBatchUploadItemForTest(
 	u *Uploader,
 	ctx context.Context,
@@ -202,4 +150,8 @@ func ExportKickoffBatchUploadItemForTest(
 	result *BatchUploadResultItem,
 ) {
 	u.kickoffBatchUploadItem(ctx, sem, item, result)
+}
+
+func ExportJoinErr(err, next error) error {
+	return joinErr(err, next)
 }

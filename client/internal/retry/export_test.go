@@ -2,7 +2,6 @@ package retry
 
 import (
 	"io"
-	"time"
 )
 
 type ExportRetryBodyFactory interface {
@@ -29,28 +28,4 @@ func ExportAttemptOpFromBufferedBody(
 	op func(attempt int, body io.Reader) error,
 ) (func(attempt int) error, error) {
 	return attemptOpFromBufferedBody(body, op)
-}
-
-func ExportResolveRetryable(fn func(error) bool) func(error) bool {
-	return resolveRetryable(fn)
-}
-
-func ExportComputeRetryDelay(backoff, maxBackoff time.Duration) time.Duration {
-	return computeRetryDelay(backoff, maxBackoff)
-}
-
-func ExportWrapErr(label string, attempt, total int, err error) error {
-	return wrapErr(label, attempt, total, err)
-}
-
-func ExportWrapCtxErr(label string, attempt, total int, err error) error {
-	return wrapCtxErr(label, attempt, total, err)
-}
-
-func ExportSetJitteredBackoffForTest(fn func(time.Duration) time.Duration) func() {
-	prev := jitteredBackoff
-	jitteredBackoff = fn
-	return func() {
-		jitteredBackoff = prev
-	}
 }

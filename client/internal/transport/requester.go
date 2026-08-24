@@ -1,15 +1,13 @@
 package transport
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/bodrovis/lokex/v2/internal/apierr"
 )
@@ -37,9 +35,7 @@ func (r *Requester) DoJSON(
 	return r.do(ctx, method, path, body, v, headers)
 }
 
-// do performs a single HTTP request (no retries).
-// Body is sent as-is. If v is nil, the response body is drained and discarded;
-// otherwise it is decoded as JSON.
+// Body is sent as-is. If v is non-nil, the response body is decoded as JSON.
 func (r *Requester) do(
 	ctx context.Context,
 	method, path string,
@@ -93,8 +89,6 @@ func (r *Requester) newRequest(
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	setContentLength(req, body)
-
 	req.Header.Set("X-Api-Token", r.Token)
 	req.Header.Set("User-Agent", r.UserAgent)
 	req.Header.Set("Accept", "application/json")
@@ -102,16 +96,6 @@ func (r *Requester) newRequest(
 	mergeHeaders(req.Header, headers)
 
 	return req, nil
-}
-
-// setContentLength sets a best-effort Content-Length for common reader types.
-func setContentLength(req *http.Request, body io.Reader) {
-	switch b := body.(type) {
-	case *bytes.Reader:
-		req.ContentLength = int64(b.Len())
-	case *strings.Reader:
-		req.ContentLength = int64(b.Len())
-	}
 }
 
 func mergeHeaders(dst, src http.Header) {
@@ -128,8 +112,7 @@ func handleResponse(resp *http.Response, v any) error {
 		return parseAPIError(resp)
 	}
 
-	if v == nil {
-		_, _ = io.Copy(io.Discard, resp.Body)
+	if v == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
 
@@ -137,37 +120,28 @@ func handleResponse(resp *http.Response, v any) error {
 }
 
 func parseAPIError(resp *http.Response) error {
-	slurp, _ := io.ReadAll(io.LimitReader(resp.Body, apierr.DefaultErrCap))
-	_, _ = io.Copy(io.Discard, resp.Body)
+	slurp, _ := io.ReadAll(
+		io.LimitReader(resp.Body, apierr.DefaultErrCap),
+	)
 
 	ae := apierr.Parse(slurp, resp.StatusCode)
 	ae.Resp = resp
+
 	return ae
 }
 
 func decodeJSONResponse(resp *http.Response, v any) error {
 	cr := &countingReader{r: resp.Body}
-	dec := json.NewDecoder(cr)
 
-	if err := dec.Decode(v); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-
+	if err := json.UnmarshalRead(cr, v); err != nil {
 		if errors.Is(err, io.ErrUnexpectedEOF) {
 			if resp.ContentLength > 0 && cr.n < resp.ContentLength {
 				return fmt.Errorf("read response: %w", io.ErrUnexpectedEOF)
 			}
+
 			return fmt.Errorf("decode response: unexpected end of JSON input")
 		}
 
-		return fmt.Errorf("decode response: %w", err)
-	}
-
-	// Reject trailing non-whitespace data after the first JSON value.
-	if err := dec.Decode(new(struct{})); err == nil {
-		return fmt.Errorf("decode response: trailing data")
-	} else if !errors.Is(err, io.EOF) {
 		return fmt.Errorf("decode response: %w", err)
 	}
 

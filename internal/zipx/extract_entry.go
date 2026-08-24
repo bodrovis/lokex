@@ -3,31 +3,25 @@ package zipx
 import (
 	"archive/zip"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 )
 
-var (
-	mkdirAllDir             = os.MkdirAll
-	pathHasSymlinkOutsideFn = pathHasSymlinkOutside
-)
-
-func extractEntry(f *zip.File, destDir, destReal string, p Policy) (int64, error) {
-	targetAbs, info, mode, skip, err := prepareEntryTarget(f, destDir, destReal, p)
+func extractEntry(
+	f *zip.File,
+	root *os.Root,
+	p Policy,
+) (int64, error) {
+	rel, mode, skip, err := prepareEntryTarget(f, p)
 	if err != nil || skip {
 		return 0, err
 	}
 
-	if info.IsDir() {
-		return 0, extractDirEntry(f, targetAbs, p)
+	if mode.IsDir() {
+		return 0, extractDirEntry(f, root, rel, p)
 	}
 
-	if err := prepareParentDir(targetAbs); err != nil {
-		return 0, err
-	}
-
-	if err := checkParentSymlinks(destReal, targetAbs, f.Name); err != nil {
+	if err := prepareParentDir(root, rel); err != nil {
 		return 0, err
 	}
 
@@ -36,57 +30,61 @@ func extractEntry(f *zip.File, destDir, destReal string, p Policy) (int64, error
 	}
 
 	if mode&os.ModeSymlink != 0 {
-		return 0, extractSymlinkEntry(f, targetAbs, destReal, p)
+		return 0, extractSymlinkEntry(f, root, rel, p)
 	}
 
-	return extractRegularFileEntry(f, targetAbs, p)
+	return extractRegularFileEntry(f, root, rel, p)
 }
 
-func prepareEntryTarget(f *zip.File, destDir, destReal string, p Policy) (targetAbs string, info fs.FileInfo, mode os.FileMode, skip bool, err error) {
-	rel, err := normalizeZipEntryPath(f.Name)
+func prepareEntryTarget(
+	f *zip.File,
+	p Policy,
+) (rel string, mode os.FileMode, skip bool, err error) {
+	rel, err = normalizeZipEntryPath(f.Name)
 	if err != nil {
-		return "", nil, 0, false, err
+		return "", 0, false, err
 	}
+
 	if rel == "" {
-		return "", nil, 0, true, nil
+		return "", 0, true, nil
 	}
 
 	if p.MaxFileBytes > 0 && int64(f.UncompressedSize64) > p.MaxFileBytes {
-		return "", nil, 0, false, fmt.Errorf("zip entry too big by header: %s (%d bytes)", f.Name, f.UncompressedSize64)
+		return "", 0, false, fmt.Errorf(
+			"zip entry too big by header: %s (%d bytes)",
+			f.Name,
+			f.UncompressedSize64,
+		)
 	}
 
-	targetAbs, err = resolveTargetPath(destDir, destReal, rel, f.Name)
-	if err != nil {
-		return "", nil, 0, false, err
-	}
-
-	info = f.FileInfo()
-	mode = info.Mode()
-
-	return targetAbs, info, mode, false, nil
+	return rel, f.Mode(), false, nil
 }
 
-func extractDirEntry(f *zip.File, targetAbs string, p Policy) error {
-	if err := mkdirAllDir(targetAbs, 0o755); err != nil {
+func extractDirEntry(
+	f *zip.File,
+	root *os.Root,
+	rel string,
+	p Policy,
+) error {
+	if err := root.MkdirAll(rel, 0o755); err != nil {
 		return err
 	}
+
 	if p.PreserveTimes && !f.Modified.IsZero() {
-		_ = os.Chtimes(targetAbs, f.Modified, f.Modified)
+		_ = root.Chtimes(rel, f.Modified, f.Modified)
 	}
+
 	return nil
 }
 
-func prepareParentDir(targetAbs string) error {
-	return mkdirAllDir(filepath.Dir(targetAbs), 0o755)
-}
+func prepareParentDir(root *os.Root, rel string) error {
+	parent := filepath.Dir(rel)
 
-func checkParentSymlinks(destReal, targetAbs, entryName string) error {
-	if bad, derr := pathHasSymlinkOutsideFn(destReal, targetAbs); derr == nil && bad {
-		return fmt.Errorf("unsafe symlink in parents for: %q", entryName)
-	} else if derr != nil && !os.IsNotExist(derr) {
-		return derr
+	if parent == "." {
+		return nil
 	}
-	return nil
+
+	return root.MkdirAll(parent, 0o755)
 }
 
 func isSpecialFileMode(mode os.FileMode) bool {

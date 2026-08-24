@@ -10,38 +10,36 @@ import (
 	"github.com/bodrovis/lokex/v2/internal/apierr"
 )
 
-var doDownloadRequestFn = func(
-	d *Downloader,
-	ctx context.Context,
-	httpc *http.Client,
-	urlStr, ua string,
-) (*http.Response, error) {
-	return d.doDownloadRequest(ctx, httpc, urlStr, ua)
-}
-
 // downloadOnce performs a single GET of the bundle and writes it to destPath.
 // It writes into a temp file first and renames it on success, so partial downloads
 // never leave broken zips at destPath.
-func (d *Downloader) downloadOnce(ctx context.Context, urlStr, destPath, ua string) error {
+func (d *Downloader) downloadOnce(
+	ctx context.Context,
+	urlStr, destPath, ua string,
+) error {
 	httpc, urlStr, destPath, err := d.downloadOncePrecheck(ctx, urlStr, destPath)
 	if err != nil {
 		return err
 	}
 
-	resp, err := doDownloadRequestFn(d, ctx, httpc, urlStr, ua)
+	resp, err := d.doDownloadRequest(ctx, httpc, urlStr, ua)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Non-2xx: read a capped snippet for an APIError and bail.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		slurp, _ := io.ReadAll(io.LimitReader(resp.Body, apierr.DefaultErrCap))
-		_, _ = io.Copy(io.Discard, resp.Body)
+		slurp, _ := io.ReadAll(
+			io.LimitReader(resp.Body, apierr.DefaultErrCap),
+		)
 		return apierr.Parse(slurp, resp.StatusCode)
 	}
 
-	return writeHTTPBodyAtomically(destPath, resp.Body, resp.ContentLength)
+	return writeHTTPBodyAtomically(
+		destPath,
+		resp.Body,
+		resp.ContentLength,
+	)
 }
 
 // downloadOncePrecheck validates inputs and extracts the http.Client.

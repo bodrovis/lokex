@@ -1,7 +1,7 @@
 package apierr
 
 import (
-	"encoding/json"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -36,19 +36,31 @@ func getNumberAsInt(m map[string]any, key string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
+
 	switch n := v.(type) {
-	case json.Number:
-		if i, err := strconv.Atoi(n.String()); err == nil {
-			return i, true
-		}
 	case float64:
-		return int(n), true
+		if n != math.Trunc(n) {
+			return 0, false
+		}
+
+		i, err := strconv.Atoi(strconv.FormatFloat(n, 'f', -1, 64))
+		if err != nil {
+			return 0, false
+		}
+
+		return i, true
+
 	case int:
 		return n, true
+
 	case string:
-		if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
-			return i, true
+		i, err := strconv.Atoi(strings.TrimSpace(n))
+		if err != nil {
+			return 0, false
 		}
+
+		return i, true
 	}
+
 	return 0, false
 }

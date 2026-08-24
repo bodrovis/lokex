@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 type zipReader interface {
@@ -29,10 +28,6 @@ var (
 		}
 		return stdZipReader{r}, nil
 	}
-
-	mkdirAll     = os.MkdirAll
-	absPath      = filepath.Abs
-	evalSymlinks = filepath.EvalSymlinks
 )
 
 // Unzip extracts srcZip into destDir according to policy p.
@@ -42,50 +37,58 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 	if err != nil {
 		return err
 	}
+
 	defer func() {
 		if cerr := r.Close(); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("close zip: %w", cerr))
 		}
 	}()
 
-	destReal, err := prepareExtractionRoot(destDir)
+	root, err := prepareExtractionRoot(destDir)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		_ = root.Close()
+	}()
 
 	files := r.Files()
+
 	if p.MaxFiles > 0 && len(files) > p.MaxFiles {
 		return fmt.Errorf("zip too many files: %d", len(files))
 	}
 
 	var totalWritten int64
+
 	for _, f := range files {
-		n, err := extractEntry(f, destDir, destReal, p)
+		n, err := extractEntry(f, root, p)
 		if err != nil {
 			return err
 		}
+
 		totalWritten += n
+
 		if p.MaxTotalBytes > 0 && totalWritten > p.MaxTotalBytes {
-			return fmt.Errorf("zip too large uncompressed (actual): %d > %d", totalWritten, p.MaxTotalBytes)
+			return fmt.Errorf(
+				"zip too large uncompressed (actual): %d > %d",
+				totalWritten,
+				p.MaxTotalBytes,
+			)
 		}
 	}
 
 	return nil
 }
 
-func prepareExtractionRoot(destDir string) (string, error) {
-	if err := mkdirAll(destDir, 0o700); err != nil {
-		return "", err
+func prepareExtractionRoot(destDir string) (*os.Root, error) {
+	if err := os.MkdirAll(destDir, 0o700); err != nil {
+		return nil, err
 	}
 
-	destAbs, err := absPath(destDir)
+	root, err := os.OpenRoot(destDir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	destReal := destAbs
-	if dr, err := evalSymlinks(destAbs); err == nil && dr != "" {
-		destReal = dr
-	}
-	return destReal, nil
+	return root, nil
 }

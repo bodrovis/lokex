@@ -1,8 +1,8 @@
 // Package upload provides an uploader for Lokalise file imports.
 //
 // This file implements the upload side of lokex:
-//   - POST /files/upload with a JSON body that includes either a filename
-//     (we'll read & base64 it) or an explicit base64 "data" field.
+//   - POST /files/upload with a JSON body containing either file data read from
+//     a local path or an explicit base64 "data" field.
 //   - Optionally poll the returned process until it finishes, or return
 //     immediately with the process id if polling is disabled.
 package upload
@@ -76,7 +76,9 @@ var ErrNoProcessID = errors.New("upload: no process id returned")
 // Behavior:
 //  1. Validates and cleans the input params and resolves the local read path
 //     (unless data is provided explicitly), ensuring it points to a regular file.
-//  2. If "data" is absent, reads the file and base64-encodes it (StdEncoding).
+//  2. If "data" is absent, the local file is streamed and base64-encoded when
+//     constructing the request body. Explicit []byte data is base64-encoded;
+//     explicit string data is used as-is.
 //     If "data" is present as []byte, it is base64-encoded; if string, it is
 //     used as-is (assumed base64).
 //  3. Sends POST with retry/backoff using the client's DoJSONWithRetry helper.
@@ -85,7 +87,16 @@ var ErrNoProcessID = errors.New("upload: no process id returned")
 // If poll is true, it will call PollProcesses on that process and only return
 // when the process reaches "finished" (otherwise it errors). If poll is false,
 // it returns immediately after kickoff with the process id.
-func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath string, poll bool) (string, error) {
+func (u *Uploader) Upload(
+	ctx context.Context,
+	params UploadParams,
+	srcPath string,
+	poll bool,
+) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	processID, err := u.uploadSingle(ctx, params, srcPath, poll)
 	if err != nil {
 		return "", err
@@ -94,15 +105,13 @@ func (u *Uploader) Upload(ctx context.Context, params UploadParams, srcPath stri
 	if !poll {
 		return processID, nil
 	}
+
 	return u.pollUntilFinished(ctx, processID)
 }
 
 func (u *Uploader) uploadSingle(ctx context.Context, params UploadParams, srcPath string, poll bool) (string, error) {
 	if err := validateUploadSingleInput(u, ctx); err != nil {
 		return "", err
-	}
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	body, filename, err := cloneAndValidateParams(params)

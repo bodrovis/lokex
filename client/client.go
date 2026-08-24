@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 	"github.com/bodrovis/lokex/v2/client/internal/transport"
 )
 
-// It is intended to be safe for concurrent use after construction, assuming
-// its fields are not mutated after NewClient returns. The embedded http.Client
-// is used as-is.
+// Client holds shared configuration for Lokalise API requests.
+//
+// It is safe for concurrent use after construction as long as its fields are
+// not mutated. The underlying http.Client is used as-is.
 type Client struct {
 	BaseURL         string        // normalized base URL with trailing slash
 	Token           string        // API token (X-Api-Token header)
@@ -77,9 +79,10 @@ func (c *Client) Requester() transport.Requester {
 	}
 }
 
-// DoJSONWithRetry performs one JSON request using the client's retry policy.
-// If body supports replay (for example via retryBodyFactory or io.ReadSeeker),
-// it may be retried without rebuilding the caller's request manually.
+// DoJSONWithRetry performs a JSON request using the client's retry policy.
+//
+// Seekable request bodies are rewound between attempts. Other bodies may be
+// buffered so they can be replayed safely.
 func (c *Client) DoJSONWithRetry(
 	ctx context.Context,
 	method, path string,
@@ -87,6 +90,7 @@ func (c *Client) DoJSONWithRetry(
 	v any,
 ) error {
 	reqr := c.Requester()
+
 	return retry.DoWithRetry(
 		ctx,
 		retry.Config{
@@ -97,7 +101,31 @@ func (c *Client) DoJSONWithRetry(
 		},
 		body,
 		func(_ int, b io.Reader) error {
-			return reqr.DoJSON(ctx, method, path, b, v)
+			if v == nil {
+				return reqr.DoJSON(ctx, method, path, b, nil)
+			}
+
+			rv := reflect.ValueOf(v)
+			if rv.Kind() != reflect.Pointer || rv.IsNil() {
+				// Let the JSON decoder return its normal error for an
+				// unsupported destination.
+				return reqr.DoJSON(ctx, method, path, b, v)
+			}
+
+			attemptTarget := reflect.New(rv.Elem().Type()).Interface()
+
+			if err := reqr.DoJSON(
+				ctx,
+				method,
+				path,
+				b,
+				attemptTarget,
+			); err != nil {
+				return err
+			}
+
+			rv.Elem().Set(reflect.ValueOf(attemptTarget).Elem())
+			return nil
 		},
 		nil,
 	)

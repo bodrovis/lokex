@@ -22,7 +22,6 @@ func (r errReader) Read(_ []byte) (int, error) {
 
 type testSyncCloseFile struct {
 	buf      bytes.Buffer
-	name     string
 	syncErr  error
 	closeErr error
 	closed   bool
@@ -39,10 +38,6 @@ func (f *testSyncCloseFile) Sync() error {
 func (f *testSyncCloseFile) Close() error {
 	f.closed = true
 	return f.closeErr
-}
-
-func (f *testSyncCloseFile) Name() string {
-	return f.name
 }
 
 func TestWriteHTTPBodyAtomically_SuccessExactLength(t *testing.T) {
@@ -215,7 +210,6 @@ func TestCopyAndValidate(t *testing.T) {
 		{
 			name: "sync error",
 			tmp: &testSyncCloseFile{
-				name:    "tmp.zip.part",
 				syncErr: errors.New("sync boom"),
 			},
 			src:     strings.NewReader("abc"),
@@ -223,19 +217,15 @@ func TestCopyAndValidate(t *testing.T) {
 			wantErr: "sync zip: sync boom",
 		},
 		{
-			name: "want len mismatch",
-			tmp: &testSyncCloseFile{
-				name: "tmp.zip.part",
-			},
+			name:    "want len mismatch",
+			tmp:     &testSyncCloseFile{},
 			src:     strings.NewReader("abc"),
 			wantLen: 10,
 			wantErr: "incomplete download: got 3 of 10: unexpected EOF",
 		},
 		{
-			name: "success",
-			tmp: &testSyncCloseFile{
-				name: "tmp.zip.part",
-			},
+			name:    "success",
+			tmp:     &testSyncCloseFile{},
 			src:     strings.NewReader("abc"),
 			wantLen: 3,
 			wantErr: "",
@@ -266,12 +256,16 @@ func TestCopyAndValidate(t *testing.T) {
 func TestFinalizeAtomicWrite(t *testing.T) {
 	t.Run("close error", func(t *testing.T) {
 		tmp := &testSyncCloseFile{
-			name:     "tmp.zip.part",
 			closeErr: errors.New("close boom"),
 		}
 		closed := false
 
-		err := download.ExportFinalizeAtomicWrite(tmp, tmp.Name(), "dest.zip", &closed)
+		err := download.ExportFinalizeAtomicWrite(
+			tmp,
+			"tmp.zip.part",
+			"dest.zip",
+			&closed,
+		)
 		if err == nil {
 			t.Fatal("FinalizeAtomicWrite() error = nil, want non-nil")
 		}
@@ -292,21 +286,28 @@ func TestFinalizeAtomicWrite(t *testing.T) {
 		})
 		defer restore()
 
-		tmp := &testSyncCloseFile{
-			name: "tmp.zip.part",
-		}
+		tmp := &testSyncCloseFile{}
 		closed := false
 
-		err := download.ExportFinalizeAtomicWrite(tmp, tmp.Name(), "dest.zip", &closed)
+		err := download.ExportFinalizeAtomicWrite(
+			tmp,
+			"tmp.zip.part",
+			"dest.zip",
+			&closed,
+		)
+
 		if err == nil {
 			t.Fatal("FinalizeAtomicWrite() error = nil, want non-nil")
 		}
+
 		if err.Error() != "finalize zip: rename boom" {
 			t.Fatalf("error = %q, want %q", err.Error(), "finalize zip: rename boom")
 		}
+
 		if !tmp.closed {
 			t.Fatal("tmp file was not closed")
 		}
+
 		if !closed {
 			t.Fatal("closed flag = false, want true after successful close")
 		}

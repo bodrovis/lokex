@@ -2,15 +2,15 @@ package utils_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
 
 func TestSleepWithTimer_UsesDefaultDelayWhenDurationNonPositive(t *testing.T) {
-	t.Parallel()
-
 	tests := []struct {
 		name string
 		d    time.Duration
@@ -21,31 +21,27 @@ func TestSleepWithTimer_UsesDefaultDelayWhenDurationNonPositive(t *testing.T) {
 		},
 		{
 			name: "negative duration",
-			d:    -1 * time.Second,
+			d:    -time.Second,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			synctest.Test(t, func(t *testing.T) {
+				timer := time.NewTimer(time.Hour)
+				defer timer.Stop()
 
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
+				start := time.Now()
 
-			timer := time.NewTimer(time.Hour)
-			defer timer.Stop()
+				err := utils.SleepWithTimer(t.Context(), timer, tt.d)
+				if err != nil {
+					t.Fatalf("SleepWithTimer() error = %v", err)
+				}
 
-			start := time.Now()
-			err := utils.SleepWithTimer(ctx, timer, tt.d)
-			elapsed := time.Since(start)
-
-			if err != nil {
-				t.Fatalf("SleepWithTimer() error = %v", err)
-			}
-
-			if elapsed < 8*time.Millisecond {
-				t.Fatalf("elapsed = %v, want at least about 10ms", elapsed)
-			}
+				if elapsed := time.Since(start); elapsed != 10*time.Millisecond {
+					t.Fatalf("elapsed = %v, want %v", elapsed, 10*time.Millisecond)
+				}
+			})
 		})
 	}
 }
@@ -60,31 +56,33 @@ func TestSleepWithTimer_ReturnsContextErrorWhenCanceled(t *testing.T) {
 	defer timer.Stop()
 
 	err := utils.SleepWithTimer(ctx, timer, time.Second)
-	if err == nil {
-		t.Fatal("SleepWithTimer() error = nil, want context cancellation error")
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SleepWithTimer() error = %v, want context.Canceled", err)
 	}
 }
 
 func TestSleepWithTimer_ReusesExpiredTimer(t *testing.T) {
-	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		timer := time.NewTimer(time.Millisecond)
+		defer timer.Stop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
+		// Let the original timer expire without receiving from timer.C.
+		synctest.Sleep(20 * time.Millisecond)
 
-	timer := time.NewTimer(1 * time.Millisecond)
-	time.Sleep(20 * time.Millisecond) // let it fire
+		start := time.Now()
 
-	start := time.Now()
-	err := utils.SleepWithTimer(ctx, timer, 20*time.Millisecond)
-	elapsed := time.Since(start)
+		err := utils.SleepWithTimer(
+			t.Context(),
+			timer,
+			20*time.Millisecond,
+		)
+		if err != nil {
+			t.Fatalf("SleepWithTimer() error = %v", err)
+		}
 
-	defer timer.Stop()
-
-	if err != nil {
-		t.Fatalf("SleepWithTimer() error = %v", err)
-	}
-
-	if elapsed < 15*time.Millisecond {
-		t.Fatalf("elapsed = %v, want timer to be reset, not return immediately", elapsed)
-	}
+		if elapsed := time.Since(start); elapsed != 20*time.Millisecond {
+			t.Fatalf("elapsed = %v, want %v", elapsed, 20*time.Millisecond)
+		}
+	})
 }

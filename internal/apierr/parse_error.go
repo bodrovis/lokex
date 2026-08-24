@@ -1,4 +1,4 @@
-// Package apierr: parsing helpers for Lokalise-style error payloads.
+// Package apierr provides parsing helpers for Lokalise-style error payloads.
 //
 // Lokalise (and some proxies) may return different JSON error shapes.
 // Parse() tries several known patterns and falls back to a generic form,
@@ -6,7 +6,7 @@
 package apierr
 
 import (
-	"encoding/json"
+	"encoding/json/v2"
 	"net/http"
 	"strings"
 )
@@ -38,7 +38,16 @@ func Parse(slurp []byte, status int) *APIError {
 		return invalidJSONError(trimmed, status, err)
 	}
 
-	obj, _ := anyJSON.(map[string]any)
+	obj, ok := anyJSON.(map[string]any)
+	if !ok {
+		return &APIError{
+			Status:  status,
+			Code:    status,
+			Message: http.StatusText(status),
+			Reason:  "unhandled error format",
+			Raw:     trimmed,
+		}
+	}
 
 	if apiErr, ok := parseTopLevelMessageStatusReason(obj, trimmed, status); ok {
 		return apiErr
@@ -66,13 +75,12 @@ func validateJSONLikeBody(trimmed string, status int) *APIError {
 }
 
 func decodeErrorJSON(trimmed string) (any, error) {
-	dec := json.NewDecoder(strings.NewReader(trimmed))
-	dec.UseNumber()
-
 	var anyJSON any
-	if err := dec.Decode(&anyJSON); err != nil {
+
+	if err := json.Unmarshal([]byte(trimmed), &anyJSON); err != nil {
 		return nil, err
 	}
+
 	return anyJSON, nil
 }
 

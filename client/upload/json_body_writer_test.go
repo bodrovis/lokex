@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -149,6 +151,61 @@ func TestWriteUploadJSON(t *testing.T) {
 			t.Fatalf("json = %q, want replace=true", got)
 		}
 	})
+
+	t.Run("array param is encoded", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		bw := bufio.NewWriter(&buf)
+
+		err := upload.ExportWriteUploadJSON(
+			bw,
+			upload.UploadParams{
+				"lang_iso": "en",
+				"tags":     []string{"foo", "bar"},
+			},
+			"",
+			upload.ExportUploadDataSpecForTest(false, false, "YWJj", nil),
+		)
+		if err != nil {
+			t.Fatalf("WriteUploadJSON() unexpected error = %v", err)
+		}
+
+		if err := bw.Flush(); err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+
+		if !strings.Contains(buf.String(), `"tags":["foo","bar"]`) {
+			t.Fatalf("json = %q, want tags array", buf.String())
+		}
+	})
+
+	t.Run("nil slice param is encoded as empty array", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		bw := bufio.NewWriter(&buf)
+
+		err := upload.ExportWriteUploadJSON(
+			bw,
+			upload.UploadParams{
+				"tags": []string(nil),
+			},
+			"",
+			upload.ExportUploadDataSpecForTest(false, false, "YWJj", nil),
+		)
+		if err != nil {
+			t.Fatalf("WriteUploadJSON() unexpected error = %v", err)
+		}
+
+		if err := bw.Flush(); err != nil {
+			t.Fatalf("Flush() error = %v", err)
+		}
+
+		if !strings.Contains(buf.String(), `"tags":[]`) {
+			t.Fatalf("json = %q, want empty tags array", buf.String())
+		}
+	})
 }
 
 func TestWriteUploadData(t *testing.T) {
@@ -175,24 +232,25 @@ func TestWriteUploadData(t *testing.T) {
 	})
 
 	t.Run("file open error", func(t *testing.T) {
-		restore := upload.ExportSetOpenFileForTest(func(string) (io.ReadCloser, error) {
-			return nil, errors.New("open boom")
-		})
-		defer restore()
+		t.Parallel()
+
+		missing := filepath.Join(t.TempDir(), "missing.txt")
 
 		var buf bytes.Buffer
 		bw := bufio.NewWriter(&buf)
 
 		err := upload.ExportWriteUploadData(
 			bw,
-			"/tmp/x",
+			missing,
 			upload.ExportUploadDataSpecForTest(true, false, "", nil),
 		)
+
 		if err == nil {
 			t.Fatal("WriteUploadData() error = nil, want non-nil")
 		}
-		if err.Error() != "open boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "open boom")
+
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("error = %v, want os.ErrNotExist", err)
 		}
 	})
 
@@ -218,31 +276,33 @@ func TestWriteUploadData(t *testing.T) {
 		}
 	})
 
-	t.Run("copy error joined with close error", func(t *testing.T) {
-		restore := upload.ExportSetOpenFileForTest(func(string) (io.ReadCloser, error) {
-			return &fakeReadCloser{
-				r:        strings.NewReader("abc"),
-				closeErr: errors.New("close boom"),
-			}, nil
-		})
-		defer restore()
+	t.Run("copy error is returned", func(t *testing.T) {
+		t.Parallel()
 
-		w := &failAfterNWriter{n: 1, err: errors.New("write boom")}
+		path := filepath.Join(t.TempDir(), "file.txt")
+		if err := os.WriteFile(path, []byte("abc"), 0o600); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		writeErr := errors.New("write boom")
+		w := &failAfterNWriter{
+			n:   1,
+			err: writeErr,
+		}
 		bw := bufio.NewWriterSize(w, 1)
 
 		err := upload.ExportWriteUploadData(
 			bw,
-			"/tmp/x",
+			path,
 			upload.ExportUploadDataSpecForTest(true, false, "", nil),
 		)
+
 		if err == nil {
 			t.Fatal("WriteUploadData() error = nil, want non-nil")
 		}
-		if !strings.Contains(err.Error(), "write boom") {
-			t.Fatalf("error = %q, want copy/write error", err.Error())
-		}
-		if !strings.Contains(err.Error(), "close boom") {
-			t.Fatalf("error = %q, want close error joined in", err.Error())
+
+		if !errors.Is(err, writeErr) {
+			t.Fatalf("error = %v, want write error", err)
 		}
 	})
 
@@ -309,7 +369,7 @@ func TestWriteUploadJSON_ErrorPaths(t *testing.T) {
 		if err == nil {
 			t.Fatal("WriteUploadJSON() error = nil, want non-nil")
 		}
-		if !strings.Contains(err.Error(), "unsupported type") {
+		if !strings.Contains(err.Error(), "marshal from Go func()") {
 			t.Fatalf("error = %q, want marshal error", err.Error())
 		}
 	})
@@ -370,13 +430,15 @@ func TestWriteUploadKV_ErrorPaths(t *testing.T) {
 
 		var buf bytes.Buffer
 		bw := bufio.NewWriter(&buf)
-		first := true
 
+		first := true
 		err := upload.ExportWriteUploadKV(bw, "k", func() {}, &first)
+
 		if err == nil {
 			t.Fatal("WriteUploadKV() error = nil, want non-nil")
 		}
-		if !strings.Contains(err.Error(), "unsupported type") {
+
+		if !strings.Contains(err.Error(), "marshal from Go func()") {
 			t.Fatalf("error = %q, want marshal error", err.Error())
 		}
 	})
@@ -439,27 +501,66 @@ func TestWriteUploadKV_ErrorPaths(t *testing.T) {
 	})
 }
 
-func TestWriteUploadData_CloseErrorOnly(t *testing.T) {
-	restore := upload.ExportSetOpenFileForTest(func(string) (io.ReadCloser, error) {
-		return &fakeReadCloser{
-			r:        strings.NewReader("abc"),
-			closeErr: errors.New("close boom"),
-		}, nil
-	})
-	defer restore()
+func TestJoinErr(t *testing.T) {
+	t.Parallel()
 
-	var buf bytes.Buffer
-	bw := bufio.NewWriter(&buf)
+	first := errors.New("first")
+	second := errors.New("second")
 
-	err := upload.ExportWriteUploadData(
-		bw,
-		"/tmp/x",
-		upload.ExportUploadDataSpecForTest(true, false, "", nil),
-	)
-	if err == nil {
-		t.Fatal("WriteUploadData() error = nil, want non-nil")
+	tests := []struct {
+		name       string
+		err        error
+		next       error
+		wantFirst  bool
+		wantSecond bool
+		wantSame   error
+	}{
+		{
+			name:     "both nil",
+			wantSame: nil,
+		},
+		{
+			name:      "next nil returns original",
+			err:       first,
+			wantFirst: true,
+			wantSame:  first,
+		},
+		{
+			name:       "original nil returns next",
+			next:       second,
+			wantSecond: true,
+			wantSame:   second,
+		},
+		{
+			name:       "joins both errors",
+			err:        first,
+			next:       second,
+			wantFirst:  true,
+			wantSecond: true,
+		},
 	}
-	if err.Error() != "close boom" {
-		t.Fatalf("error = %q, want %q", err.Error(), "close boom")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := upload.ExportJoinErr(tt.err, tt.next)
+
+			if tt.wantSame != nil && got != tt.wantSame {
+				t.Fatalf("JoinErr() = %v, want original error %v", got, tt.wantSame)
+			}
+
+			if tt.wantSame == nil && tt.err == nil && tt.next == nil && got != nil {
+				t.Fatalf("JoinErr() = %v, want nil", got)
+			}
+
+			if tt.wantFirst && !errors.Is(got, first) {
+				t.Fatalf("JoinErr() = %v, want first error", got)
+			}
+
+			if tt.wantSecond && !errors.Is(got, second) {
+				t.Fatalf("JoinErr() = %v, want second error", got)
+			}
+		})
 	}
 }

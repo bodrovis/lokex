@@ -1,29 +1,36 @@
 package background
 
-import (
-	"strings"
-)
+import "strings"
 
-// normalizeProcessIDs trims inputs, preserves caller order (including duplicates),
+// normalizeProcessIDs trims inputs, preserves caller order and duplicates,
 // and returns:
-//   - ordered: trimmed IDs in original order (empties kept as "")
-//   - processMap: latest status per UNIQUE non-empty ID (seeded with StatusQueued)
-//   - pending: set of UNIQUE non-empty IDs to poll
-func normalizeProcessIDs(processIDs []string) (ordered []string, processMap map[string]QueuedProcess, pending map[string]struct{}) {
-	ordered = make([]string, 0, len(processIDs))
-	processMap = make(map[string]QueuedProcess, len(processIDs))
-	pending = make(map[string]struct{}, len(processIDs))
+//   - ordered: trimmed IDs in original order, including empty IDs
+//   - processMap: initial status per unique non-empty ID
+//   - pending: set of unique non-empty IDs to poll
+func normalizeProcessIDs(
+	processIDs []string,
+) ([]string, map[string]QueuedProcess, map[string]struct{}) {
+	ordered := make([]string, len(processIDs))
+	processMap := make(map[string]QueuedProcess, len(processIDs))
+	pending := make(map[string]struct{}, len(processIDs))
 
-	for _, raw := range processIDs {
+	for i, raw := range processIDs {
 		id := strings.TrimSpace(raw)
-		ordered = append(ordered, id)
+		ordered[i] = id
+
 		if id == "" {
 			continue
 		}
+
 		if _, ok := processMap[id]; !ok {
-			processMap[id] = QueuedProcess{ProcessID: id, Status: StatusQueued}
+			processMap[id] = QueuedProcess{
+				ProcessID: id,
+				Status:    StatusQueued,
+			}
 		}
+
 		pending[id] = struct{}{}
 	}
-	return
+
+	return ordered, processMap, pending
 }

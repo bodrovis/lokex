@@ -27,29 +27,44 @@ func pollRound(
 	}
 
 	reqr := c.Requester()
-
 	resCh := make(chan pollResult, len(ids))
 
-	g, gctx := errgroup.WithContext(ctx)
+	var g errgroup.Group
 	g.SetLimit(maxConcurrent)
 
 	for _, id := range ids {
-		cur := id
 		g.Go(func() error {
-			path := utils.ProjectPath(c.ProjectID, fmt.Sprintf("processes/%s", cur))
+			path := utils.ProjectPath(
+				c.ProjectID,
+				fmt.Sprintf("processes/%s", id),
+			)
 
 			var resp processResponse
-			if err := reqr.DoJSON(gctx, http.MethodGet, path, nil, &resp); err != nil {
-				resCh <- pollResult{id: cur, err: err}
+
+			if err := reqr.DoJSON(
+				ctx,
+				http.MethodGet,
+				path,
+				nil,
+				&resp,
+			); err != nil {
+				resCh <- pollResult{
+					id:  id,
+					err: err,
+				}
 				return nil
 			}
 
-			resCh <- pollResult{id: cur, proc: resp.ToQueuedProcess()}
+			resCh <- pollResult{
+				id:   id,
+				proc: resp.ToQueuedProcess(),
+			}
+
 			return nil
 		})
 	}
 
-	// Goroutines report per-ID errors through resCh; g.Wait() only synchronizes completion.
+	// Workers report per-ID errors through resCh.
 	_ = g.Wait()
 	close(resCh)
 
@@ -61,6 +76,7 @@ func pollRound(
 			errs[r.id] = r.err
 			continue
 		}
+
 		procs = append(procs, r.proc)
 	}
 

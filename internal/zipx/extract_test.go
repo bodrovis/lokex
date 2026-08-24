@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/bodrovis/lokex/v2/internal/zipx"
@@ -22,103 +23,106 @@ func (r fakeZipReader) Files() []*zip.File {
 	return r.files
 }
 
-func TestUnzip(t *testing.T) {
-	t.Run("open zip reader error", func(t *testing.T) {
-		restore := zipx.ExportSetOpenZipReaderForTest(func(string) (zipx.ExportZipReader, error) {
-			return nil, errors.New("open boom")
-		})
-		defer restore()
+func TestPrepareExtractionRoot(t *testing.T) {
+	t.Parallel()
 
-		err := zipx.Unzip("/tmp/x.zip", t.TempDir(), zipx.DefaultPolicy())
-		if err == nil {
-			t.Fatal("Unzip() error = nil, want non-nil")
+	t.Run("success", func(t *testing.T) {
+		t.Parallel()
+
+		destDir := filepath.Join(t.TempDir(), "nested", "dest")
+
+		root, err := zipx.ExportPrepareExtractionRoot(destDir)
+		if err != nil {
+			t.Fatalf(
+				"PrepareExtractionRoot() unexpected error = %v",
+				err,
+			)
 		}
-		if err.Error() != "open boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "open boom")
+		defer func() {
+			_ = root.Close()
+		}()
+
+		if root == nil {
+			t.Fatal("root = nil, want non-nil")
+		}
+
+		info, err := os.Stat(destDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !info.IsDir() {
+			t.Fatalf("%q is not a directory", destDir)
 		}
 	})
 
-	t.Run("close zip error is returned", func(t *testing.T) {
-		restoreOpen := zipx.ExportSetOpenZipReaderForTest(func(string) (zipx.ExportZipReader, error) {
-			return fakeZipReader{
-				files:    nil,
-				closeErr: errors.New("close boom"),
-			}, nil
-		})
-		defer restoreOpen()
+	t.Run("mkdir error", func(t *testing.T) {
+		t.Parallel()
 
-		restoreMkdir := zipx.ExportSetMkdirAllForTest(func(string, os.FileMode) error {
-			return nil
-		})
-		defer restoreMkdir()
+		base := t.TempDir()
 
-		restoreAbs := zipx.ExportSetAbsPathForTest(func(path string) (string, error) {
-			return path, nil
-		})
-		defer restoreAbs()
-
-		restoreEval := zipx.ExportSetEvalSymlinksForTest(func(path string) (string, error) {
-			return "", errors.New("ignore")
-		})
-		defer restoreEval()
-
-		err := zipx.Unzip("/tmp/x.zip", t.TempDir(), zipx.DefaultPolicy())
-		if err == nil {
-			t.Fatal("Unzip() error = nil, want non-nil")
+		file := filepath.Join(base, "file")
+		if err := os.WriteFile(
+			file,
+			[]byte("x"),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
 		}
-		if err.Error() != "close zip: close boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "close zip: close boom")
+
+		root, err := zipx.ExportPrepareExtractionRoot(
+			filepath.Join(file, "child"),
+		)
+		if err == nil {
+			if root != nil {
+				_ = root.Close()
+			}
+
+			t.Fatal("PrepareExtractionRoot() error = nil, want non-nil")
+		}
+
+		if root != nil {
+			t.Fatal("root != nil on error")
 		}
 	})
 }
 
-func TestPrepareExtractionRoot(t *testing.T) {
-	t.Run("mkdir all error", func(t *testing.T) {
-		restore := zipx.ExportSetMkdirAllForTest(func(string, os.FileMode) error {
-			return errors.New("mkdir boom")
-		})
-		defer restore()
+func TestUnzip_CloseZipErrorIsReturned(t *testing.T) {
+	restore := zipx.ExportSetOpenZipReaderForTest(
+		func(string) (zipx.ExportZipReader, error) {
+			return fakeZipReader{
+				closeErr: errors.New("close boom"),
+			}, nil
+		},
+	)
+	defer restore()
 
-		got, err := zipx.ExportPrepareExtractionRoot("/tmp/x")
-		if err == nil {
-			t.Fatal("PrepareExtractionRoot() error = nil, want non-nil")
-		}
-		if err.Error() != "mkdir boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "mkdir boom")
-		}
-		if got != "" {
-			t.Fatalf("got = %q, want empty string on error", got)
-		}
-	})
+	err := zipx.Unzip(
+		"/unused/test.zip",
+		t.TempDir(),
+		zipx.DefaultPolicy(),
+	)
+	if err == nil {
+		t.Fatal("Unzip() error = nil, want non-nil")
+	}
 
-	t.Run("abs error", func(t *testing.T) {
-		restoreMkdir := zipx.ExportSetMkdirAllForTest(func(string, os.FileMode) error {
-			return nil
-		})
-		defer restoreMkdir()
-
-		restoreAbs := zipx.ExportSetAbsPathForTest(func(string) (string, error) {
-			return "", errors.New("abs boom")
-		})
-		defer restoreAbs()
-
-		got, err := zipx.ExportPrepareExtractionRoot("/tmp/x")
-		if err == nil {
-			t.Fatal("PrepareExtractionRoot() error = nil, want non-nil")
-		}
-		if err.Error() != "abs boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "abs boom")
-		}
-		if got != "" {
-			t.Fatalf("got = %q, want empty string on error", got)
-		}
-	})
+	if err.Error() != "close zip: close boom" {
+		t.Fatalf(
+			"error = %q, want %q",
+			err.Error(),
+			"close zip: close boom",
+		)
+	}
 }
 
 func TestUnzip_OpenZipReaderError_Default(t *testing.T) {
 	t.Parallel()
 
-	err := zipx.Unzip("/definitely/not/exist.zip", t.TempDir(), zipx.DefaultPolicy())
+	err := zipx.Unzip(
+		"/definitely/not/exist.zip",
+		t.TempDir(),
+		zipx.DefaultPolicy(),
+	)
 	if err == nil {
 		t.Fatal("Unzip() error = nil, want non-nil")
 	}

@@ -1,3 +1,3 @@
 module github.com/bodrovis/lokex/tools
 
-go 1.26
+go 1.27

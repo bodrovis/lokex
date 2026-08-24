@@ -10,12 +10,21 @@ import (
 )
 
 var (
-	removePathFn = os.Remove
-	symlinkFn    = os.Symlink
-	readAllFn    = io.ReadAll
+	readAllFn = io.ReadAll
+
+	// Keep this injectable because creating symlinks may be restricted
+	// on some platforms/environments, especially Windows.
+	symlinkFn = func(root *os.Root, target, name string) error {
+		return root.Symlink(target, name)
+	}
 )
 
-func extractSymlinkEntry(f *zip.File, targetAbs, destReal string, p Policy) error {
+func extractSymlinkEntry(
+	f *zip.File,
+	root *os.Root,
+	rel string,
+	p Policy,
+) error {
 	if !p.AllowSymlinks {
 		return nil
 	}
@@ -29,13 +38,14 @@ func extractSymlinkEntry(f *zip.File, targetAbs, destReal string, p Policy) erro
 		return err
 	}
 
-	_ = removePathFn(targetAbs)
-
-	if err := validateSymlinkPlacement(f.Name, targetAbs, destReal, linkTarget); err != nil {
+	if err := validateSymlinkPlacement(f.Name, rel, linkTarget); err != nil {
 		return err
 	}
 
-	if err := symlinkFn(linkTarget, targetAbs); err != nil {
+	// Remove an existing entry before creating the symlink.
+	_ = root.Remove(rel)
+
+	if err := symlinkFn(root, linkTarget, rel); err != nil {
 		return fmt.Errorf("create symlink: %w", err)
 	}
 
@@ -53,10 +63,13 @@ func readSymlinkTarget(f *zip.File) (string, error) {
 
 	const maxLinkTarget = 1 << 20 // 1 MiB safety cap
 
-	linkTargetBytes, rerr := readAllFn(io.LimitReader(rc, maxLinkTarget+1))
-	if rerr != nil {
-		return "", fmt.Errorf("read symlink target: %w", rerr)
+	linkTargetBytes, err := readAllFn(
+		io.LimitReader(rc, maxLinkTarget+1),
+	)
+	if err != nil {
+		return "", fmt.Errorf("read symlink target: %w", err)
 	}
+
 	if len(linkTargetBytes) > maxLinkTarget {
 		return "", fmt.Errorf("symlink target too large")
 	}
@@ -68,30 +81,27 @@ func validateSymlinkTargetString(entryName, linkTarget string) error {
 	if linkTarget == "" {
 		return fmt.Errorf("empty symlink target: %q", entryName)
 	}
+
 	if filepath.IsAbs(linkTarget) || filepath.VolumeName(linkTarget) != "" {
-		return fmt.Errorf("absolute symlink target not allowed: %q -> %q", entryName, linkTarget)
+		return fmt.Errorf(
+			"absolute symlink target not allowed: %q -> %q",
+			entryName,
+			linkTarget,
+		)
 	}
+
 	return nil
 }
 
-func validateSymlinkPlacement(entryName, targetAbs, destReal, linkTarget string) error {
-	parentResolved, err := evalSymlinksPathFn(filepath.Dir(targetAbs))
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("symlink parent resolve error: %w", err)
-		}
-		// If parent doesn't exist, mkdirall above does it, so we fallback to intended parent.
-		parentResolved = filepath.Dir(targetAbs)
-	}
+func validateSymlinkPlacement(entryName, rel, linkTarget string) error {
+	targetRel := filepath.Join(filepath.Dir(rel), linkTarget)
 
-	linkAbs := filepath.Join(parentResolved, filepath.Base(targetAbs))
-	if !isPathWithinBaseFn(destReal, linkAbs) {
-		return fmt.Errorf("symlink destination escapes extraction root: %q", linkAbs)
-	}
-
-	targetCandidate := filepath.Join(parentResolved, linkTarget)
-	if !isPathWithinBaseFn(destReal, targetCandidate) {
-		return fmt.Errorf("symlink target escapes extraction root: %q -> %q", entryName, linkTarget)
+	if !filepath.IsLocal(targetRel) {
+		return fmt.Errorf(
+			"symlink target escapes extraction root: %q -> %q",
+			entryName,
+			linkTarget,
+		)
 	}
 
 	return nil

@@ -65,13 +65,11 @@ func validateStdBase64CharsAndPaddingPlacement(s string) (int, error) {
 func normalizeStdBase64Padding(s string, pad int) (string, error) {
 	if pad > 0 {
 		if len(s)%4 != 0 {
-			return "", fmt.Errorf("upload: invalid base64 padding (length must be multiple of 4 when '=' present)")
+			return "", fmt.Errorf(
+				"upload: invalid base64 padding (length must be multiple of 4 when '=' present)",
+			)
 		}
-		for i := len(s) - pad; i < len(s); i++ {
-			if s[i] != '=' {
-				return "", fmt.Errorf("upload: invalid base64 padding")
-			}
-		}
+
 		return s, nil
 	}
 

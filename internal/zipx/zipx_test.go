@@ -41,7 +41,7 @@ func TestUnzip_ZipSlipBlocked(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected zip-slip error, got nil")
 	}
-	if !contains(err.Error(), "unsafe path") {
+	if !strings.Contains(err.Error(), "unsafe path") {
 		t.Fatalf("expected unsafe path error, got: %v", err)
 	}
 }
@@ -71,7 +71,7 @@ func TestUnzip_MaxFileBytes_Declared(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected entry too big error, got nil")
 	}
-	if !contains(err.Error(), "entry too big") {
+	if !strings.Contains(err.Error(), "entry too big") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -117,22 +117,49 @@ func TestUnzip_PreserveTimes(t *testing.T) {
 	}
 }
 
-func TestUnzip_NormalizesLeadingSlashAndBackslashes(t *testing.T) {
+func TestUnzip_NormalizesBackslashes(t *testing.T) {
+	t.Parallel()
+
 	zp := makeZip(t, []zentry{
-		{name: "/rooted/ok.txt", data: []byte("1")},
-		{name: `win\path\ok2.txt`, data: []byte("2")},
+		{name: `win\path\ok.txt`, data: []byte("ok")},
 	})
+
 	dst := t.TempDir()
 
 	if err := zipx.Unzip(zp, dst, zipx.DefaultPolicy()); err != nil {
 		t.Fatalf("Unzip() error: %v", err)
 	}
 
-	if b, err := os.ReadFile(filepath.Join(dst, "rooted", "ok.txt")); err != nil || string(b) != "1" {
-		t.Fatalf("rooted/ok.txt missing/wrong: %v %q", err, b)
+	got, err := os.ReadFile(filepath.Join(dst, "win", "path", "ok.txt"))
+	if err != nil {
+		t.Fatalf("read extracted: %v", err)
 	}
-	if b, err := os.ReadFile(filepath.Join(dst, "win", "path", "ok2.txt")); err != nil || string(b) != "2" {
-		t.Fatalf("win/path/ok2.txt missing/wrong: %v %q", err, b)
+
+	if string(got) != "ok" {
+		t.Fatalf("content mismatch: got %q want %q", got, "ok")
+	}
+}
+
+func TestUnzip_AbsoluteEntryPathRejected(t *testing.T) {
+	t.Parallel()
+
+	zp := makeZip(t, []zentry{
+		{name: "/rooted/evil.txt", data: []byte("nope")},
+	})
+
+	dst := t.TempDir()
+
+	err := zipx.Unzip(zp, dst, zipx.DefaultPolicy())
+	if err == nil {
+		t.Fatal("Unzip() error = nil, want absolute path error")
+	}
+
+	if !strings.Contains(err.Error(), "unsafe absolute path in zip") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst, "rooted", "evil.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absolute entry was extracted: %v", err)
 	}
 }
 
@@ -229,8 +256,10 @@ func TestUnzip_ParentPathIsFile(t *testing.T) {
 
 func TestUnzip_UnsafeParentSymlinkBlocked(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("symlink behavior is flaky on Windows")
+		t.Skip("symlink behavior is environment-dependent on Windows")
 	}
+
+	t.Parallel()
 
 	zp := makeZip(t, []zentry{
 		{name: "link/evil.txt", data: []byte("nope")},
@@ -243,6 +272,7 @@ func TestUnzip_UnsafeParentSymlinkBlocked(t *testing.T) {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := os.MkdirAll(outside, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -253,10 +283,12 @@ func TestUnzip_UnsafeParentSymlinkBlocked(t *testing.T) {
 
 	err := zipx.Unzip(zp, dst, zipx.DefaultPolicy())
 	if err == nil {
-		t.Fatalf("expected unsafe symlink error, got nil")
+		t.Fatal("Unzip() error = nil, want symlink escape error")
 	}
-	if !strings.Contains(err.Error(), "unsafe symlink in parents") {
-		t.Fatalf("unexpected error: %v", err)
+
+	// The important security property: nothing was written outside root.
+	if _, err := os.Stat(filepath.Join(outside, "evil.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("file escaped extraction root: %v", err)
 	}
 }
 
@@ -410,5 +442,41 @@ func TestUnzip_PreserveTimes_Directory(t *testing.T) {
 	}
 	if d := fi.ModTime().Sub(mod).Abs(); d > time.Second {
 		t.Fatalf("dir mtime not preserved (diff %v): got %v want %v", d, fi.ModTime(), mod)
+	}
+}
+
+func TestUnzip_ParentSymlinkInsideRootAllowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior is environment-dependent on Windows")
+	}
+
+	t.Parallel()
+
+	zp := makeZip(t, []zentry{
+		{name: "link/a.txt", data: []byte("ok")},
+	})
+
+	dst := t.TempDir()
+
+	realDir := filepath.Join(dst, "real")
+	if err := os.Mkdir(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Symlink(realDir, filepath.Join(dst, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := zipx.Unzip(zp, dst, zipx.DefaultPolicy()); err != nil {
+		t.Fatalf("Unzip() error: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(realDir, "a.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if string(got) != "ok" {
+		t.Fatalf("content = %q, want %q", got, "ok")
 	}
 }

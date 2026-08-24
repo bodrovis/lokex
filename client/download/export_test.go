@@ -1,7 +1,6 @@
 package download
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net"
@@ -16,7 +15,6 @@ type ExportSyncCloseFile interface {
 	io.Writer
 	Sync() error
 	Close() error
-	Name() string
 }
 
 func ExportWriteHTTPBodyAtomically(destPath string, src io.Reader, wantLen int64) error {
@@ -49,12 +47,6 @@ func ExportSetRenameFileForTest(fn func(oldpath, newpath string) error) func() {
 	return func() { renameFile = prev }
 }
 
-func ExportSetRemoveFileForTest(fn func(name string) error) func() {
-	prev := removeFile
-	removeFile = fn
-	return func() { removeFile = prev }
-}
-
 func ExportDownloadOnce(
 	d *Downloader,
 	ctx context.Context,
@@ -69,21 +61,6 @@ func ExportDownloadOncePrecheck(
 	urlStr, destPath string,
 ) (*http.Client, string, string, error) {
 	return d.downloadOncePrecheck(ctx, urlStr, destPath)
-}
-
-func ExportSetDoDownloadRequestForTest(
-	fn func(
-		d *Downloader,
-		ctx context.Context,
-		httpc *http.Client,
-		urlStr, ua string,
-	) (*http.Response, error),
-) func() {
-	prev := doDownloadRequestFn
-	doDownloadRequestFn = fn
-	return func() {
-		doDownloadRequestFn = prev
-	}
 }
 
 func ExportDoDownloadRequest(
@@ -167,14 +144,6 @@ func ExportSetMkdirTempForTest(fn func(dir, pattern string) (string, error)) fun
 	}
 }
 
-func ExportSetRemoveAllForTest(fn func(path string) error) func() {
-	prev := removeAll
-	removeAll = fn
-	return func() {
-		removeAll = prev
-	}
-}
-
 func ExportDoDownload(
 	d *Downloader,
 	ctx context.Context,
@@ -198,15 +167,5 @@ func ExportSetDownloadAndUnzipForTest(
 func ExportNopFetchFunc() FetchFunc {
 	return func(context.Context, io.Reader) (string, error) {
 		return "https://example.com/bundle.zip", nil
-	}
-}
-
-func ExportSetEncodeJSONBodyForTest(
-	fn func(body any) (*bytes.Reader, error),
-) func() {
-	prev := encodeJSONBody
-	encodeJSONBody = fn
-	return func() {
-		encodeJSONBody = prev
 	}
 }

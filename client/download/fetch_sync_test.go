@@ -2,7 +2,7 @@ package download_test
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -56,14 +57,15 @@ func TestFetchBundle(t *testing.T) {
 	t.Run("nil context uses background context", func(t *testing.T) {
 		t.Parallel()
 
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"bundle_url":"https://example.com/file.zip"}`)
 		}))
-		defer srv.Close()
+
+		httpc := srv.Client()
 
 		d := download.NewDownloader(&client.Client{
-			HTTPClient: srv.Client(),
+			HTTPClient: httpc,
 			BaseURL:    srv.URL + "/",
 			ProjectID:  "project-id",
 		})
@@ -124,7 +126,7 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 			}
 
 			var got map[string]any
-			if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+			if err := json.UnmarshalRead(req.Body, &got); err != nil {
 				t.Fatalf("decode req: %v", err)
 			}
 
@@ -218,7 +220,11 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", target, httpmock.NewStringResponder(200, `{"bundle_url":42`)) // broken
+		httpmock.RegisterResponder(
+			"POST",
+			target,
+			httpmock.NewStringResponder(200, `{"bundle_url":"https://example.com/bundle.zip"`),
+		)
 
 		cli, err := client.NewClient(
 			token,
@@ -238,33 +244,66 @@ func TestDownloader_FetchBundle_Variants(t *testing.T) {
 		}
 	})
 
-	t.Run("context deadline bubbles up", func(t *testing.T) {
+	t.Run("success but bad JSON schema in response -> unmarshal error", func(t *testing.T) {
 		httpmock.Activate()
 		defer httpmock.DeactivateAndReset()
 
-		httpmock.RegisterResponder("POST", target, func(*http.Request) (*http.Response, error) {
-			return nil, context.DeadlineExceeded
-		})
+		httpmock.RegisterResponder(
+			"POST",
+			target,
+			httpmock.NewStringResponder(200, `{"bundle_url":42}`),
+		)
 
-		cli, err := client.NewClient(token, projectID, client.WithBackoff(
-			1*time.Millisecond,
-			5*time.Millisecond,
-		))
+		cli, err := client.NewClient(
+			token,
+			projectID,
+		)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		d := download.NewDownloader(cli)
 
-		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
-		defer cancel()
-
 		buf := mustJSONBody(t, map[string]any{"format": "json"})
 
-		_, err = d.FetchBundle(ctx, buf)
-		if err == nil || !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("want DeadlineExceeded, got %v", err)
+		_, err = d.FetchBundle(context.Background(), buf)
+		if err == nil ||
+			!strings.Contains(err.Error(), "unmarshal JSON number into Go string") ||
+			!strings.Contains(err.Error(), `"/bundle_url"`) {
+			t.Fatalf("want JSON type error for bundle_url, got %v", err)
 		}
+	})
+
+	t.Run("context deadline bubbles up", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			httpc := &http.Client{
+				Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				}),
+			}
+
+			cli, err := client.NewClient(
+				token,
+				projectID,
+				client.WithHTTPClient(httpc),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			d := download.NewDownloader(cli)
+
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+			defer cancel()
+
+			buf := mustJSONBody(t, map[string]any{"format": "json"})
+
+			_, err = d.FetchBundle(ctx, buf)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("want DeadlineExceeded, got %v", err)
+			}
+		})
 	})
 }
 

@@ -3,7 +3,7 @@ package upload_test
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -134,7 +134,7 @@ func TestUploader_Upload_Happy_Base64FromFile(t *testing.T) {
 		}
 
 		var got map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
 			t.Fatalf("decode req: %v", err)
 		}
 
@@ -213,9 +213,10 @@ func TestUploader_Upload_NoPoll(t *testing.T) {
 		}
 
 		var got map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
 			t.Fatalf("decode req: %v", err)
 		}
+
 		if got["filename"] == "" {
 			t.Fatalf("missing filename")
 		}
@@ -259,9 +260,10 @@ func TestUploader_Upload_UsesExistingDataString(t *testing.T) {
 	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
 	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
 		var got map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
 			t.Fatalf("decode req: %v", err)
 		}
+
 		if got["filename"] == "" || got["lang_iso"] != "en" {
 			t.Fatalf("missing required fields: %#v", got)
 		}
@@ -304,9 +306,10 @@ func TestUploader_Upload_ConvertsDataBytesToBase64(t *testing.T) {
 	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
 	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
 		var got map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
 			t.Fatalf("decode req: %v", err)
 		}
+
 		if got["data"] != base64.StdEncoding.EncodeToString([]byte("XYZ")) {
 			t.Fatalf("data not base64'd, got %v", got["data"])
 		}
@@ -726,7 +729,7 @@ func TestUploader_Upload_DataProvided_DoesNotNeedLocalFile(t *testing.T) {
 
 	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
 		var got map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
 			t.Fatalf("decode req: %v", err)
 		}
 
@@ -780,7 +783,7 @@ func TestUploader_Upload_SrcPathOverridesLocalReadPath(t *testing.T) {
 
 	httpmock.RegisterResponder("POST", targetPost, func(req *http.Request) (*http.Response, error) {
 		var got map[string]any
-		if err := json.NewDecoder(req.Body).Decode(&got); err != nil {
+		if err := json.UnmarshalRead(req.Body, &got); err != nil {
 			t.Fatalf("decode req: %v", err)
 		}
 

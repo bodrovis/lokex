@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/bodrovis/lokex/v2/client"
 	"github.com/bodrovis/lokex/v2/client/internal/background"
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
@@ -16,24 +15,6 @@ import (
 // POST /files/async-download.
 type AsyncDownloadResponse struct {
 	ProcessID string `json:"process_id"`
-}
-
-var pollProcessesFn = func(
-	ctx context.Context,
-	processIDs []string,
-	c *client.Client,
-) ([]background.QueuedProcess, error) {
-	return background.PollProcesses(ctx, processIDs, c)
-}
-
-func ExportSetPollProcessesForTest(
-	fn func(context.Context, []string, *client.Client) ([]background.QueuedProcess, error),
-) func() {
-	prev := pollProcessesFn
-	pollProcessesFn = fn
-	return func() {
-		pollProcessesFn = prev
-	}
 }
 
 // FetchBundleAsync kicks off an async export (POST /files/async-download) and polls
@@ -90,7 +71,7 @@ func (d *Downloader) startAsyncDownload(ctx context.Context, body io.Reader) (st
 }
 
 func (d *Downloader) pollAsyncDownloadProcess(ctx context.Context, pid string) (background.QueuedProcess, error) {
-	results, err := pollProcessesFn(ctx, []string{pid}, d.client)
+	results, err := background.PollProcesses(ctx, []string{pid}, d.client)
 	if err != nil {
 		return background.QueuedProcess{}, fmt.Errorf("fetch bundle async: poll processes: %w", err)
 	}
@@ -105,7 +86,7 @@ func (d *Downloader) pollAsyncDownloadProcess(ctx context.Context, pid string) (
 }
 
 func interpretAsyncDownloadProcess(p background.QueuedProcess) (string, error) {
-	st := utils.NormalizeString(p.Status)
+	st := strings.ToLower(strings.TrimSpace(p.Status))
 
 	switch st {
 	case background.StatusFinished:

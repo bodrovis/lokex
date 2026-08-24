@@ -37,46 +37,67 @@ func parseNestedErrorObject(obj map[string]any, raw string, status int) (*APIErr
 		Code:    code,
 		Message: coalesce(msg, http.StatusText(status)),
 		Raw:     raw,
-		Details: pickNestedDetails(errObj),
+		Details: pickDetails(errObj),
 	}, true
 }
 
-func parseAltTopLevelMessageCode(obj map[string]any, raw string, status int) (*APIError, bool) {
+func parseAltTopLevelMessageCode(
+	obj map[string]any,
+	raw string,
+	status int,
+) (*APIError, bool) {
 	msg, ok := getString(obj, "message")
 	if !ok {
 		return nil, false
 	}
 
-	if code, ok := getNumberAsInt(obj, "code"); ok {
-		return &APIError{
-			Status:  status,
-			Code:    code,
-			Message: msg,
-			Raw:     raw,
-			Details: pickDetails(obj),
-		}, true
+	code, ok := getNumberAsInt(obj, "code")
+	if !ok {
+		code, ok = getNumberAsInt(obj, "errorCode")
+	}
+	if !ok {
+		return nil, false
 	}
 
-	if code, ok := getNumberAsInt(obj, "errorCode"); ok {
-		return &APIError{
-			Status:  status,
-			Code:    code,
-			Message: msg,
-			Raw:     raw,
-			Details: pickDetails(obj),
-		}, true
-	}
-
-	return nil, false
-}
-
-func parseGenericFallback(obj map[string]any, raw string, status int) *APIError {
-	reason, _ := getString(obj, "error")
 	return &APIError{
 		Status:  status,
-		Message: coalesce(getStringOr(obj, "message", ""), http.StatusText(status)),
+		Code:    code,
+		Message: msg,
+		Raw:     raw,
+		Details: pickDetails(obj),
+	}, true
+}
+
+func parseGenericFallback(
+	obj map[string]any,
+	raw string,
+	status int,
+) *APIError {
+	reason, _ := getString(obj, "error")
+
+	return &APIError{
+		Status: status,
+		Code:   status,
+		Message: coalesce(
+			getStringOr(obj, "message", ""),
+			http.StatusText(status),
+		),
 		Reason:  coalesce(reason, "unhandled error format"),
 		Raw:     raw,
 		Details: obj,
+	}
+}
+
+func pickDetails(obj map[string]any) map[string]any {
+	if detObj, ok := obj["details"].(map[string]any); ok {
+		return detObj
+	}
+
+	if det, ok := obj["details"]; ok {
+		return map[string]any{"details": det}
+	}
+
+	return map[string]any{
+		"reason": "server error without details",
 	}
 }

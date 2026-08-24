@@ -11,12 +11,7 @@ func SleepWithTimer(ctx context.Context, timer *time.Timer, d time.Duration) err
 	if d <= 0 {
 		d = 10 * time.Millisecond
 	}
-	if !timer.Stop() {
-		select {
-		case <-timer.C:
-		default:
-		}
-	}
+
 	timer.Reset(d)
 
 	select {

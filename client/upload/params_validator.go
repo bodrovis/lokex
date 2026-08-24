@@ -1,31 +1,31 @@
 package upload
 
 import (
-	"fmt"
+	"errors"
 	"maps"
 	"strings"
 )
 
-// cloneAndValidateParams copies user params and extracts a clean file path.
+// cloneAndValidateParams copies user params and validates the filename field.
 func cloneAndValidateParams(params UploadParams) (UploadParams, string, error) {
-	body := make(UploadParams, len(params)+1)
+	body := make(UploadParams, len(params))
 	maps.Copy(body, params)
 
 	raw, ok := body["filename"]
 	if !ok {
-		return nil, "", fmt.Errorf("upload: missing 'filename' param")
+		return nil, "", errors.New("upload: missing 'filename' param")
 	}
 
 	name, ok := raw.(string)
 	if !ok {
-		return nil, "", fmt.Errorf("upload: 'filename' must be a non-empty string")
+		return nil, "", errors.New("upload: 'filename' must be a non-empty string")
 	}
+
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return nil, "", fmt.Errorf("upload: 'filename' must be a non-empty string")
+		return nil, "", errors.New("upload: 'filename' must be a non-empty string")
 	}
 
 	body["filename"] = name
-
 	return body, name, nil
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -45,15 +46,17 @@ func TestPollProcesses_QueuedToFinished_SingleID(t *testing.T) {
 		}
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		curHit := atomic.AddInt32(&hits, 1)
 
 		if got := r.Header.Get("X-Api-Token"); got != token {
 			nonBlockingSend(fmt.Errorf("X-Api-Token = %q, want %q", got, token))
 		}
+
 		if got := r.Header.Get("User-Agent"); got != ua {
 			nonBlockingSend(fmt.Errorf("User-Agent = %q, want %q", got, ua))
 		}
+
 		if r.Method != http.MethodGet {
 			nonBlockingSend(fmt.Errorf("method = %s, want GET", r.Method))
 		}
@@ -64,16 +67,20 @@ func TestPollProcesses_QueuedToFinished_SingleID(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 
 		// first hit → queued, second → finished
 		if curHit == 1 {
-			_, _ = w.Write([]byte(`{"process":{"process_id":"upl_123","status":"queued","message":"","details":{}}}`))
+			_, _ = w.Write([]byte(
+				`{"process":{"process_id":"upl_123","status":"queued","message":"","details":{}}}`,
+			))
 			return
 		}
-		_, _ = w.Write([]byte(`{"process":{"process_id":"upl_123","status":"finished","message":"","details":{"download_url":"https://example/file.zip"}}}`))
+
+		_, _ = w.Write([]byte(
+			`{"process":{"process_id":"upl_123","status":"finished","message":"","details":{"download_url":"https://example/file.zip"}}}`,
+		))
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -108,28 +115,32 @@ func TestPollProcesses_QueuedToFinished_SingleID(t *testing.T) {
 }
 
 func TestPollProcesses_ContextCancel(t *testing.T) {
-	// handler sleeps longer than our context to force cancel
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(200 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"process":{"process_id":"slow","status":"queued","message":"","details":{}}}`))
-	}))
-	defer srv.Close()
+	synctest.Test(t, func(t *testing.T) {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(200 * time.Millisecond)
 
-	c := newTestClient(t, withServer(srv))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(
+				`{"process":{"process_id":"slow","status":"queued","message":"","details":{}}}`,
+			))
+		}))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+		c := newTestClient(t, withServer(srv))
 
-	if _, err := background.PollProcesses(ctx, []string{"slow"}, c); err == nil {
-		t.Fatalf("expected context error, got nil")
-	}
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+
+		_, err := background.PollProcesses(ctx, []string{"slow"}, c)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("error = %v, want %v", err, context.DeadlineExceeded)
+		}
+	})
 }
 
 func TestPollProcesses_MultipleIDs_PreservesOrder(t *testing.T) {
 	var aHits, bHits int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/projects/p/processes/a":
 			atomic.AddInt32(&aHits, 1)
@@ -148,7 +159,6 @@ func TestPollProcesses_MultipleIDs_PreservesOrder(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -169,7 +179,7 @@ func TestPollProcesses_MultipleIDs_PreservesOrder(t *testing.T) {
 }
 
 func TestPollProcesses_DuplicatesAndEmpty_PreservesOrder(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/projects/p/processes/a":
 			w.Header().Set("Content-Type", "application/json")
@@ -181,7 +191,6 @@ func TestPollProcesses_DuplicatesAndEmpty_PreservesOrder(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -206,12 +215,11 @@ func TestPollProcesses_DuplicatesAndEmpty_PreservesOrder(t *testing.T) {
 
 func TestPollProcesses_Duplicates_DoNotSpamRequests(t *testing.T) {
 	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"process":{"process_id":"a","status":"finished","message":"","details":{}}}`))
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -230,7 +238,7 @@ func TestPollProcesses_Duplicates_DoNotSpamRequests(t *testing.T) {
 }
 
 func TestPollProcesses_NonRetryableError_MarksFailedAndContinues(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/projects/p/processes/x":
 			// 404 is non-retryable -> should mark failed and stop polling x
@@ -242,7 +250,6 @@ func TestPollProcesses_NonRetryableError_MarksFailedAndContinues(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -265,29 +272,41 @@ func TestPollProcesses_NonRetryableError_MarksFailedAndContinues(t *testing.T) {
 }
 
 func TestPollProcesses_PollBudgetExpires_ReturnsQueued(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"process":{"process_id":"x","status":"queued","message":"","details":{}}}`))
-	}))
-	defer srv.Close()
+	synctest.Test(t, func(t *testing.T) {
+		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(
+				`{"process":{"process_id":"x","status":"queued","message":"","details":{}}}`,
+			))
+		}))
 
-	c := newTestClient(t,
-		withServer(srv),
-	)
+		c := newTestClient(
+			t,
+			withServer(srv),
+			withPollWait(5*time.Millisecond, 250*time.Millisecond),
+		)
 
-	got, err := background.PollProcesses(context.Background(), []string{"x"}, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].Status != background.StatusQueued {
-		t.Fatalf("got=%#v", got)
-	}
+		start := time.Now()
+
+		got, err := background.PollProcesses(t.Context(), []string{"x"}, c)
+
+		if elapsed := time.Since(start); elapsed != 250*time.Millisecond {
+			t.Fatalf("elapsed = %v, want %v", elapsed, 250*time.Millisecond)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(got) != 1 || got[0].Status != background.StatusQueued {
+			t.Fatalf("got=%#v", got)
+		}
+	})
 }
 
 func TestPollProcesses_TransientErrorIsIgnoredThenRecovered(t *testing.T) {
 	var hits int32
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// first call → 500
 		if atomic.AddInt32(&hits, 1) == 1 {
 			http.Error(w, "boom", http.StatusInternalServerError)
@@ -297,7 +316,6 @@ func TestPollProcesses_TransientErrorIsIgnoredThenRecovered(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"process":{"process_id":"x","status":"finished","message":"","details":{}}}`))
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -316,11 +334,10 @@ func TestPollProcesses_TransientErrorIsIgnoredThenRecovered(t *testing.T) {
 }
 
 func TestPollProcesses_NilContext(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"process":{"process_id":"x","status":"finished","message":"","details":{}}}`))
 	}))
-	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
@@ -398,86 +415,6 @@ func TestPollProcesses(t *testing.T) {
 			t.Fatalf("got[1] = %+v, want queued duplicate p1", got[1])
 		}
 	})
-
-	t.Run("next sleep wait false stops polling with best effort results", func(t *testing.T) {
-		restorePollRound := background.ExportSetPollRoundForTest(
-			func(_ context.Context, _ *client.Client, pending map[string]struct{}, _ int) ([]background.QueuedProcess, map[string]error) {
-				return []background.QueuedProcess{
-					{ProcessID: "p1", Status: background.StatusQueued},
-				}, nil
-			},
-		)
-		defer restorePollRound()
-
-		restoreNextSleep := background.ExportSetNextSleepWaitForTest(
-			func(time.Duration, time.Time) (time.Duration, bool) {
-				return 0, false
-			},
-		)
-		defer restoreNextSleep()
-
-		cli := newTestClient(t,
-			withPollWait(time.Millisecond, time.Second),
-		)
-
-		got, err := background.PollProcesses(context.Background(), []string{"p1"}, cli)
-		if err != nil {
-			t.Fatalf("PollProcesses() unexpected error = %v", err)
-		}
-		if len(got) != 1 {
-			t.Fatalf("len(got) = %d, want %d", len(got), 1)
-		}
-		if got[0].ProcessID != "p1" || got[0].Status != background.StatusQueued {
-			t.Fatalf("got[0] = %+v, want queued p1", got[0])
-		}
-	})
-
-	t.Run("sleep stop breaks polling with best effort results", func(t *testing.T) {
-		restorePollRound := background.ExportSetPollRoundForTest(
-			func(_ context.Context, _ *client.Client, pending map[string]struct{}, _ int) ([]background.QueuedProcess, map[string]error) {
-				return []background.QueuedProcess{
-					{ProcessID: "p1", Status: background.StatusQueued},
-				}, nil
-			},
-		)
-		defer restorePollRound()
-
-		restoreSleep := background.ExportSetSleepWithTimerForTest(
-			func(context.Context, *time.Timer, time.Duration) error {
-				return context.DeadlineExceeded
-			},
-		)
-		defer restoreSleep()
-
-		cli := newTestClient(t,
-			withPollWait(time.Millisecond, time.Second),
-		)
-
-		got, err := background.PollProcesses(context.Background(), []string{"p1"}, cli)
-		if err != nil {
-			t.Fatalf("PollProcesses() unexpected error = %v", err)
-		}
-		if len(got) != 1 {
-			t.Fatalf("len(got) = %d, want %d", len(got), 1)
-		}
-		if got[0].ProcessID != "p1" || got[0].Status != background.StatusQueued {
-			t.Fatalf("got[0] = %+v, want queued p1", got[0])
-		}
-	})
-}
-
-func TestNewStoppedTimer(t *testing.T) {
-	restore := background.ExportSetNewTimerForTest(func(time.Duration) *time.Timer {
-		timer := time.NewTimer(0)
-		<-timer.C
-		return timer
-	})
-	defer restore()
-
-	timer := background.ExportNewStoppedTimer()
-	if timer == nil {
-		t.Fatal("NewStoppedTimer() = nil, want non-nil")
-	}
 }
 
 func TestNextSleepWait(t *testing.T) {
@@ -508,28 +445,30 @@ func TestNextSleepWait(t *testing.T) {
 	})
 }
 
-func TestSleepBetweenPollRounds(t *testing.T) {
-	restore := background.ExportSetSleepWithTimerForTest(
-		func(context.Context, *time.Timer, time.Duration) error {
-			return context.DeadlineExceeded
-		},
-	)
-	defer restore()
+func TestSleepBetweenPollRounds_PollBudgetExpires(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := t.Context()
 
-	ctx := context.Background()
-	pollCtx, cancel := context.WithCancel(context.Background())
-	cancel()
+		pollCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+		defer cancel()
 
-	timer := time.NewTimer(time.Hour)
-	defer timer.Stop()
+		timer := time.NewTimer(time.Hour)
+		timer.Stop()
 
-	stopped, err := background.ExportSleepBetweenPollRounds(ctx, pollCtx, timer, time.Millisecond)
-	if err != nil {
-		t.Fatalf("SleepBetweenPollRounds() unexpected error = %v", err)
-	}
-	if !stopped {
-		t.Fatal("stopped = false, want true")
-	}
+		stopped, err := background.ExportSleepBetweenPollRounds(
+			ctx,
+			pollCtx,
+			timer,
+			time.Second,
+		)
+		if err != nil {
+			t.Fatalf("SleepBetweenPollRounds() unexpected error = %v", err)
+		}
+
+		if !stopped {
+			t.Fatal("stopped = false, want true")
+		}
+	})
 }
 
 // === helpers ===
@@ -580,6 +519,15 @@ func withPollWait(initial, max time.Duration) testClientOption {
 	}
 }
 
+func TestNextPollWait_NonPositiveFallsBackToMinimum(t *testing.T) {
+	got := background.ExportNextPollWait(time.Second, time.Now().Add(-time.Second))
+	want := 10 * time.Millisecond
+
+	if got != want {
+		t.Fatalf("NextPollWait() = %v, want %v", got, want)
+	}
+}
+
 func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 	t.Helper()
 
@@ -594,6 +542,12 @@ func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+
+	// NewTestServer initializes URL on the first Client() call.
+	var serverClient *http.Client
+	if cfg.srv != nil {
+		serverClient = cfg.srv.Client()
 	}
 
 	clientOpts := []client.Option{
@@ -615,7 +569,7 @@ func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 	case cfg.httpClient != nil:
 		clientOpts = append(clientOpts, client.WithHTTPClient(cfg.httpClient))
 	case cfg.srv != nil:
-		clientOpts = append(clientOpts, client.WithHTTPClient(cfg.srv.Client()))
+		clientOpts = append(clientOpts, client.WithHTTPClient(serverClient))
 	default:
 		clientOpts = append(clientOpts, client.WithHTTPClient(&http.Client{}))
 	}
@@ -630,13 +584,4 @@ func newTestClient(t *testing.T, opts ...testClientOption) *client.Client {
 	}
 
 	return c
-}
-
-func TestNextPollWait_NonPositiveFallsBackToMinimum(t *testing.T) {
-	got := background.ExportNextPollWait(time.Second, time.Now().Add(-time.Second))
-	want := 10 * time.Millisecond
-
-	if got != want {
-		t.Fatalf("NextPollWait() = %v, want %v", got, want)
-	}
 }

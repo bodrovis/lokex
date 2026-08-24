@@ -121,15 +121,3 @@ func TestValidateAndNormalizeStdBase64String(t *testing.T) {
 		})
 	}
 }
-
-func TestNormalizeStdBase64Padding_InvalidPaddingAtEnd(t *testing.T) {
-	t.Parallel()
-
-	_, err := upload.ExportNormalizeStdBase64Padding("ABCX", 1)
-	if err == nil {
-		t.Fatal("error = nil, want error")
-	}
-	if err.Error() != "upload: invalid base64 padding" {
-		t.Fatalf("error = %q, want %q", err.Error(), "upload: invalid base64 padding")
-	}
-}

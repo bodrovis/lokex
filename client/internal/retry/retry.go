@@ -115,23 +115,27 @@ func attemptOpFromBufferedBody(
 	op func(attempt int, body io.Reader) error,
 ) (func(attempt int) error, error) {
 	var payload []byte
+
 	if body != nil {
 		b, err := io.ReadAll(body)
-		if err != nil {
-			return nil, fmt.Errorf("buffer request body: %w", err)
-		}
+
 		if cbody, ok := body.(io.Closer); ok {
 			_ = cbody.Close()
 		}
+
+		if err != nil {
+			return nil, fmt.Errorf("buffer request body: %w", err)
+		}
+
 		payload = b
 	}
 
-	attemptOp := func(attempt int) error {
+	return func(attempt int) error {
 		var rdr io.Reader
 		if payload != nil {
 			rdr = bytes.NewReader(payload)
 		}
+
 		return op(attempt, rdr)
-	}
-	return attemptOp, nil
+	}, nil
 }

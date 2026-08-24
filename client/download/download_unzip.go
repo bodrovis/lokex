@@ -13,7 +13,6 @@ import (
 var (
 	mkdirAll  = os.MkdirAll
 	mkdirTemp = os.MkdirTemp
-	removeAll = os.RemoveAll
 )
 
 // DownloadAndUnzip downloads the zip from bundleURL with retry/backoff,
@@ -89,11 +88,9 @@ func createDownloadTempDir() (string, func(), error) {
 		return "", nil, fmt.Errorf("download: create temp dir: %w", err)
 	}
 
-	cleanup := func() {
-		_ = removeAll(tmpDir)
-	}
-
-	return tmpDir, cleanup, nil
+	return tmpDir, func() {
+		_ = os.RemoveAll(tmpDir)
+	}, nil
 }
 
 func (d *Downloader) downloadAndValidateZip(

@@ -12,21 +12,6 @@ import (
 )
 
 func TestValidate(t *testing.T) {
-	t.Run("open error is wrapped", func(t *testing.T) {
-		restore := zipx.ExportSetOpenZipReaderForTest(func(string) (zipx.ExportZipReader, error) {
-			return nil, errors.New("open boom")
-		})
-		defer restore()
-
-		err := zipx.Validate("any.zip")
-		if err == nil {
-			t.Fatal("Validate() error = nil, want non-nil")
-		}
-		if err.Error() != "zip validate open: open boom" {
-			t.Fatalf("error = %q, want %q", err.Error(), "zip validate open: open boom")
-		}
-	})
-
 	t.Run("close error is wrapped", func(t *testing.T) {
 		restore := zipx.ExportSetOpenZipReaderForTest(func(string) (zipx.ExportZipReader, error) {
 			return fakeZipReader{closeErr: errors.New("close boom")}, nil

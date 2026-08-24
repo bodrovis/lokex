@@ -19,8 +19,7 @@ type UploadResponse struct {
 }
 
 // Read exists only so uploadBodyFactory satisfies io.Reader.
-// Retry-aware request execution uses NewBody when available and should not
-// consume this reader directly.
+// Retry-aware request execution uses NewBody to create a fresh body per attempt.
 func (f uploadBodyFactory) Read(p []byte) (int, error) {
 	return 0, io.EOF
 }
@@ -28,6 +27,10 @@ func (f uploadBodyFactory) Read(p []byte) (int, error) {
 func (u *Uploader) kickoffUploadStreaming(ctx context.Context, body UploadParams, cleanPath string) (string, error) {
 	if u == nil || u.client == nil {
 		return "", errors.New("upload: kickoff: uploader/client is nil")
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	cleanPath = strings.TrimSpace(cleanPath)

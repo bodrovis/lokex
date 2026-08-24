@@ -7,22 +7,21 @@ import (
 	"path/filepath"
 )
 
-var (
-	createTempFile = os.CreateTemp
-	renameFile     = os.Rename
-	removeFile     = os.Remove
-)
+var renameFile = os.Rename
 
 type syncCloseFile interface {
 	io.Writer
 	Sync() error
 	Close() error
-	Name() string
 }
 
-// writeHTTPBodyAtomically writes src into a temp file next to destPath and renames it on success.
-// If wantLen >= 0, it checks that the copied size matches exactly and returns
-// io.ErrUnexpectedEOF on mismatch.
+// writeHTTPBodyAtomically writes src to a temporary file next to destPath
+// and moves it into place only after the complete body has been written,
+// validated, synced, and closed.
+//
+// This prevents partial downloads from being left at destPath.
+// Replacement of an existing destination is not guaranteed to be atomic
+// on all platforms.
 func writeHTTPBodyAtomically(destPath string, src io.Reader, wantLen int64) (err error) {
 	tmp, err := createTempFileNear(destPath)
 	if err != nil {
@@ -49,7 +48,7 @@ func createTempFileNear(destPath string) (*os.File, error) {
 	dir := filepath.Dir(destPath)
 	prefix := filepath.Base(destPath) + ".part-"
 
-	tmp, err := createTempFile(dir, prefix)
+	tmp, err := os.CreateTemp(dir, prefix)
 	if err != nil {
 		return nil, fmt.Errorf("create temp zip: %w", err)
 	}
@@ -61,7 +60,7 @@ func cleanupTempFile(tmp *os.File, tmpName string, closed *bool, retErr *error) 
 		_ = tmp.Close()
 	}
 	if *retErr != nil {
-		_ = removeFile(tmpName)
+		_ = os.Remove(tmpName)
 	}
 }
 
@@ -90,7 +89,7 @@ func finalizeAtomicWrite(tmp syncCloseFile, tmpName, destPath string, closed *bo
 
 	// On Windows, rename over an existing file can be unreliable; remove first.
 	// Ignore remove error: destination may not exist yet.
-	_ = removeFile(destPath)
+	_ = os.Remove(destPath)
 
 	if err := renameFile(tmpName, destPath); err != nil {
 		return fmt.Errorf("finalize zip: %w", err)

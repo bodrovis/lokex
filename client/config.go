@@ -13,7 +13,7 @@ const (
 	defaultBaseURL = "https://api.lokalise.com/api2/"
 
 	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
-	defaultUserAgent = "lokex/2.0.0"
+	defaultUserAgent = "lokex/3.0.0"
 
 	// defaults for retry/backoff and HTTP timeouts.
 	defaultMaxRetries     = 3
@@ -22,7 +22,7 @@ const (
 	defaultHTTPTimeout    = 30 * time.Second
 
 	// defaults for the polling helper.
-	defaultPollInitialWait = 1 * time.Second
+	defaultPollInitialWait = time.Second
 	defaultPollMaxWait     = 120 * time.Second
 )
 
@@ -38,14 +38,19 @@ func WithBaseURL(u string) Option {
 		if u == "" {
 			return errors.New("base URL cannot be empty")
 		}
+
 		parsed, err := url.Parse(u)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err != nil ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+			parsed.Host == "" ||
+			parsed.Fragment != "" {
 			return errors.New("invalid base URL")
 		}
-		// normalize: ensure trailing slash and keep path/joining sane
+
 		if !strings.HasSuffix(parsed.Path, "/") {
 			parsed.Path += "/"
 		}
+
 		c.BaseURL = parsed.String()
 		return nil
 	}
@@ -84,8 +89,9 @@ func WithHTTPTimeout(d time.Duration) Option {
 			return errors.New("http timeout cannot be negative")
 		}
 		if c.HTTPClient == nil {
-			c.HTTPClient = &http.Client{Timeout: defaultHTTPTimeout}
+			c.HTTPClient = &http.Client{}
 		}
+
 		c.HTTPClient.Timeout = d
 		return nil
 	}

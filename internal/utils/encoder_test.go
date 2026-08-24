@@ -1,7 +1,7 @@
 package utils_test
 
 import (
-	"encoding/json"
+	json "encoding/json/v2"
 	"io"
 	"math"
 	"strings"
@@ -10,7 +10,7 @@ import (
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
 
-func TestEncodeJSONBody_DisablesHTMLEscaping_AndAddsNewline(t *testing.T) {
+func TestEncodeJSONBody_DoesNotEscapeHTML(t *testing.T) {
 	in := map[string]any{
 		"raw": "<script>alert('x')</script>",
 		"&":   "ampersand",
@@ -21,26 +21,26 @@ func TestEncodeJSONBody_DisablesHTMLEscaping_AndAddsNewline(t *testing.T) {
 		t.Fatalf("EncodeJSONBody error: %v", err)
 	}
 
-	// bytes.Reader → читаем вручную
 	outBytes, err := io.ReadAll(buf)
 	if err != nil {
 		t.Fatalf("read encoded json: %v", err)
 	}
+
 	out := string(outBytes)
 
-	// 1) No HTML escaping
+	// HTML-specific characters should not be escaped.
 	if strings.Contains(out, `\u003c`) ||
 		strings.Contains(out, `\u003e`) ||
 		strings.Contains(out, `\u0026`) {
 		t.Fatalf("found escaped HTML in output: %q", out)
 	}
 
-	// 2) Ends with newline
-	if !strings.HasSuffix(out, "\n") {
-		t.Fatalf("output must end with newline, got: %q", out)
+	// Marshal does not append a trailing newline.
+	if strings.HasSuffix(out, "\n") {
+		t.Fatalf("output must not end with newline, got: %q", out)
 	}
 
-	// 3) Round-trip sanity
+	// Round-trip sanity.
 	var rt map[string]any
 	if err := json.Unmarshal(outBytes, &rt); err != nil {
 		t.Fatalf("round-trip unmarshal failed: %v\npayload: %q", err, out)
@@ -68,5 +68,27 @@ func TestEncodeJSONBody_ErrorOnUnsupportedType(t *testing.T) {
 	// optional: assert it’s wrapped with our prefix
 	if !strings.Contains(err.Error(), "encode body:") {
 		t.Fatalf("error should be wrapped with context, got: %v", err)
+	}
+}
+
+func TestEncodeJSONBody_NilSliceAsEmptyArray(t *testing.T) {
+	in := struct {
+		Items []string `json:"items"`
+	}{
+		Items: nil,
+	}
+
+	buf, err := utils.EncodeJSONBody(in)
+	if err != nil {
+		t.Fatalf("EncodeJSONBody error: %v", err)
+	}
+
+	outBytes, err := io.ReadAll(buf)
+	if err != nil {
+		t.Fatalf("read encoded json: %v", err)
+	}
+
+	if got, want := string(outBytes), `{"items":[]}`; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

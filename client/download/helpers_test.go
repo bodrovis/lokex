@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/bodrovis/lokex/v2/internal/utils"
@@ -31,7 +30,7 @@ func buildZip(t *testing.T, entries map[string]string, symlinks map[string]strin
 		if err != nil {
 			t.Fatalf("CreateHeader(%s): %v", name, err)
 		}
-		if _, err := io.Copy(w, strings.NewReader(content)); err != nil {
+		if _, err := w.Write([]byte(content)); err != nil {
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
@@ -48,7 +47,7 @@ func buildZip(t *testing.T, entries map[string]string, symlinks map[string]strin
 		if err != nil {
 			t.Fatalf("CreateHeader(symlink %s): %v", link, err)
 		}
-		if _, err := io.Copy(w, strings.NewReader(target)); err != nil {
+		if _, err := w.Write([]byte(target)); err != nil {
 			t.Fatalf("write symlink %s: %v", link, err)
 		}
 	}
@@ -61,14 +60,19 @@ func buildZip(t *testing.T, entries map[string]string, symlinks map[string]strin
 
 func registerZipResponder(t *testing.T, url string, zipBytes []byte) {
 	t.Helper()
-	httpmock.RegisterResponder("GET", url, func(req *http.Request) (*http.Response, error) {
-		return httpmock.NewBytesResponse(200, zipBytes), nil
-	})
+
+	httpmock.RegisterResponder(
+		http.MethodGet,
+		url,
+		func(*http.Request) (*http.Response, error) {
+			return httpmock.NewBytesResponse(http.StatusOK, zipBytes), nil
+		},
+	)
 }
 
 func registerZipResponderWithHeaderAsserts(t *testing.T, url string, zipBytes []byte, wantUA string) {
 	t.Helper()
-	httpmock.RegisterResponder("GET", url, func(req *http.Request) (*http.Response, error) {
+	httpmock.RegisterResponder(http.MethodGet, url, func(req *http.Request) (*http.Response, error) {
 		if got := req.Header.Get("User-Agent"); wantUA != "" && got != wantUA {
 			t.Fatalf("GET UA = %q, want %q", got, wantUA)
 		}
@@ -78,7 +82,7 @@ func registerZipResponderWithHeaderAsserts(t *testing.T, url string, zipBytes []
 		if got := req.Header.Get("Accept-Encoding"); got != "identity" {
 			t.Fatalf("GET Accept-Encoding = %q, want identity", got)
 		}
-		return httpmock.NewBytesResponse(200, zipBytes), nil
+		return httpmock.NewBytesResponse(http.StatusOK, zipBytes), nil
 	})
 }
 

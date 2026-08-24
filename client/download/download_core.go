@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"strings"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -42,8 +41,6 @@ type FetchFunc func(ctx context.Context, body io.Reader) (string, error)
 var downloadAndUnzipFn = func(d *Downloader, ctx context.Context, bundleURL, destDir string) error {
 	return d.DownloadAndUnzip(ctx, bundleURL, destDir)
 }
-
-var encodeJSONBody = utils.EncodeJSONBody
 
 const clientIsNilMsg = "download: downloader/client is nil"
 
@@ -132,19 +129,5 @@ func (d *Downloader) doDownload(
 }
 
 func prepareBodyReader(params DownloadParams) (*bytes.Reader, error) {
-	// copy to avoid mutating caller's map
-	var body map[string]any
-	if len(params) > 0 {
-		body = make(map[string]any, len(params))
-		maps.Copy(body, params)
-	} else {
-		body = map[string]any{}
-	}
-
-	rdr, err := encodeJSONBody(body)
-	if err != nil {
-		return nil, err
-	}
-
-	return rdr, nil
+	return utils.EncodeJSONBody(params)
 }

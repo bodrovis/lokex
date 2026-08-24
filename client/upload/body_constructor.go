@@ -7,7 +7,11 @@ import (
 	"io"
 )
 
-func newUploadBody(ctx context.Context, params UploadParams, cleanPath string) (io.ReadCloser, error) {
+func newUploadBody(
+	ctx context.Context,
+	params UploadParams,
+	cleanPath string,
+) (io.ReadCloser, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -22,9 +26,21 @@ func newUploadBody(ctx context.Context, params UploadParams, cleanPath string) (
 	}
 
 	pr, pw := io.Pipe()
+
 	go func() {
 		var werr error
+
+		cancelDone := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			defer close(cancelDone)
+			_ = pw.CloseWithError(ctx.Err())
+		})
+
 		defer func() {
+			if !stop() {
+				<-cancelDone
+			}
+
 			if werr != nil {
 				_ = pw.CloseWithError(werr)
 			} else {
@@ -32,26 +48,21 @@ func newUploadBody(ctx context.Context, params UploadParams, cleanPath string) (
 			}
 		}()
 
-		// Close the pipe if ctx is canceled.
-		stop := context.AfterFunc(ctx, func() {
-			_ = pw.CloseWithError(ctx.Err())
-		})
-		defer stop()
-
-		// If already canceled, bail early (avoids noisy pipe errors).
 		if err := ctx.Err(); err != nil {
 			werr = err
 			return
 		}
 
 		bw := bufio.NewWriterSize(pw, 256<<10)
-		defer func() {
-			if ferr := bw.Flush(); werr == nil && ferr != nil {
-				werr = ferr
-			}
-		}()
 
-		werr = writeUploadJSON(bw, params, cleanPath, spec)
+		if err := writeUploadJSON(bw, params, cleanPath, spec); err != nil {
+			werr = err
+			return
+		}
+
+		if err := bw.Flush(); err != nil {
+			werr = err
+		}
 	}()
 
 	return pr, nil

@@ -11,7 +11,7 @@ import (
 )
 
 // batchUploadConcurrency is capped by the Lokalise API.
-var batchUploadConcurrency = 6
+const batchUploadConcurrency = 6
 
 var batchUploadSingleFn = func(
 	u *Uploader,
@@ -20,10 +20,6 @@ var batchUploadSingleFn = func(
 	srcPath string,
 ) (string, error) {
 	return u.uploadSingle(ctx, params, srcPath, false)
-}
-
-var batchHandleProcessStatusFn = func(processID, status, message string) (string, error) {
-	return handleProcessStatus(processID, status, message)
 }
 
 // BatchUploadItem describes a single upload job in a batch.
@@ -56,7 +52,7 @@ func (r BatchUploadResult) HasErrors() bool {
 	return false
 }
 
-// SuccessfulProcessIDs returns all process IDs that completed without error.
+// SuccessfulProcessIDs returns process IDs for all items without an error.
 func (r BatchUploadResult) SuccessfulProcessIDs() []string {
 	ids := make([]string, 0, len(r.Items))
 	for _, item := range r.Items {
@@ -122,22 +118,19 @@ func newBatchUploadResultItem(index int, item BatchUploadItem) BatchUploadResult
 	}
 }
 
-func (u *Uploader) kickoffBatchUploads(ctx context.Context, items []BatchUploadItem, results []BatchUploadResultItem) {
-	limit := batchUploadConcurrency
-	if limit <= 0 {
-		limit = 1
-	}
+func (u *Uploader) kickoffBatchUploads(
+	ctx context.Context,
+	items []BatchUploadItem,
+	results []BatchUploadResultItem,
+) {
+	sem := make(chan struct{}, batchUploadConcurrency)
 
-	sem := make(chan struct{}, limit)
 	var wg sync.WaitGroup
 
 	for i, item := range items {
-		wg.Add(1)
-
-		go func(i int, item BatchUploadItem) {
-			defer wg.Done()
+		wg.Go(func() {
 			u.kickoffBatchUploadItem(ctx, sem, item, &results[i])
-		}(i, item)
+		})
 	}
 
 	wg.Wait()
@@ -194,7 +187,7 @@ func applyPolledBatchResults(
 	idToIndexes map[string][]int,
 	processes []background.QueuedProcess,
 ) {
-	seen := make(map[string]bool, len(processes))
+	seen := make(map[string]struct{}, len(processes))
 
 	for _, p := range processes {
 		processID := strings.TrimSpace(p.ProcessID)
@@ -207,9 +200,9 @@ func applyPolledBatchResults(
 			continue
 		}
 
-		seen[processID] = true
+		seen[processID] = struct{}{}
 
-		_, err := batchHandleProcessStatusFn(processID, p.Status, p.Message)
+		_, err := handleProcessStatus(processID, p.Status, p.Message)
 		if err != nil {
 			markBatchItemError(results, indexes, err)
 		}
@@ -228,14 +221,18 @@ func markMissingBatchProcessResults(
 	results []BatchUploadResultItem,
 	processIDs []string,
 	idToIndexes map[string][]int,
-	seen map[string]bool,
+	seen map[string]struct{},
 ) {
 	for _, processID := range processIDs {
-		if seen[processID] {
+		if _, ok := seen[processID]; ok {
 			continue
 		}
 
-		err := fmt.Errorf("upload: no process results returned (process_id=%s)", processID)
+		err := fmt.Errorf(
+			"upload: no process results returned (process_id=%s)",
+			processID,
+		)
+
 		for _, idx := range idToIndexes[processID] {
 			results[idx].Err = err
 		}

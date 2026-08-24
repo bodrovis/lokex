@@ -42,40 +42,227 @@ func TestNewClient_WithUserAgentAndHTTPTimeout(t *testing.T) {
 }
 
 func TestNewClient_OptionValidation(t *testing.T) {
-	// invalid base url
-	if _, err := client.NewClient("t", "p", client.WithBaseURL(":// nope")); err == nil {
-		t.Fatalf("expected error for invalid base URL")
+	if _, err := client.NewClient(
+		"t",
+		"p",
+		client.WithBaseURL(":// nope"),
+	); err == nil {
+		t.Fatal("expected error for invalid base URL")
 	}
-	// WithHTTPClient(nil) should error
-	if _, err := client.NewClient("t", "p", client.WithHTTPClient(nil)); err == nil {
-		t.Fatalf("expected error for nil http client")
+
+	if _, err := client.NewClient(
+		"t",
+		"p",
+		client.WithHTTPClient(nil),
+	); err == nil {
+		t.Fatal("expected error for nil http client")
 	}
-	// trailing slash is enforced by WithBaseURL
-	srv := httptest.NewServer(http.NotFoundHandler())
-	defer srv.Close()
-	baseNoSlash := srv.URL // no trailing slash
-	c, err := client.NewClient("t", "p", client.WithBaseURL(baseNoSlash))
+
+	srv := httptest.NewTestServer(t, http.NotFoundHandler())
+
+	// Initializes the test server and populates srv.URL.
+	_ = srv.Client()
+
+	baseNoSlash := srv.URL
+
+	c, err := client.NewClient(
+		"t",
+		"p",
+		client.WithBaseURL(baseNoSlash),
+	)
 	if err != nil {
 		t.Fatalf("unexpected: %v", err)
 	}
+
 	if got := c.BaseURL[len(c.BaseURL)-1:]; got != "/" {
 		t.Fatalf("expected trailing slash, got %q", c.BaseURL)
 	}
 }
 
-func TestWithBaseURL_ErrorWhenEmptyAfterTrim(t *testing.T) {
+func TestWithBaseURL(t *testing.T) {
 	t.Parallel()
 
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr string
+	}{
+		{
+			name:  "accepts https",
+			input: "https://example.com/api2/",
+			want:  "https://example.com/api2/",
+		},
+		{
+			name:  "accepts http",
+			input: "http://example.com/api2/",
+			want:  "http://example.com/api2/",
+		},
+		{
+			name:  "trims whitespace",
+			input: "  https://example.com/api2/  ",
+			want:  "https://example.com/api2/",
+		},
+		{
+			name:  "adds trailing slash",
+			input: "https://example.com/api2",
+			want:  "https://example.com/api2/",
+		},
+		{
+			name:    "rejects empty",
+			input:   " \t\n ",
+			wantErr: "base URL cannot be empty",
+		},
+		{
+			name:    "rejects malformed URL",
+			input:   ":// nope",
+			wantErr: "invalid base URL",
+		},
+		{
+			name:    "rejects unsupported scheme",
+			input:   "ftp://example.com/api2/",
+			wantErr: "invalid base URL",
+		},
+		{
+			name:    "rejects missing host",
+			input:   "https:///api2/",
+			wantErr: "invalid base URL",
+		},
+		{
+			name:    "rejects fragment",
+			input:   "https://example.com/api2/#x",
+			wantErr: "invalid base URL",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c := &client.Client{}
+			err := client.WithBaseURL(tt.input)(c)
+
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("WithBaseURL() error = nil, want non-nil")
+				}
+				if err.Error() != tt.wantErr {
+					t.Fatalf("error = %q, want %q", err.Error(), tt.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("WithBaseURL() error = %v", err)
+			}
+			if c.BaseURL != tt.want {
+				t.Fatalf("BaseURL = %q, want %q", c.BaseURL, tt.want)
+			}
+		})
+	}
+}
+
+func TestWithUserAgent(t *testing.T) {
+	t.Parallel()
+
+	t.Run("sets trimmed value", func(t *testing.T) {
+		t.Parallel()
+
+		c := &client.Client{UserAgent: "old"}
+
+		if err := client.WithUserAgent("  lokex-test/1.0  ")(c); err != nil {
+			t.Fatalf("WithUserAgent() error = %v", err)
+		}
+
+		if c.UserAgent != "lokex-test/1.0" {
+			t.Fatalf("UserAgent = %q, want %q", c.UserAgent, "lokex-test/1.0")
+		}
+	})
+
+	t.Run("empty value is ignored", func(t *testing.T) {
+		t.Parallel()
+
+		c := &client.Client{UserAgent: "existing"}
+
+		if err := client.WithUserAgent(" \t ")(c); err != nil {
+			t.Fatalf("WithUserAgent() error = %v", err)
+		}
+
+		if c.UserAgent != "existing" {
+			t.Fatalf("UserAgent = %q, want %q", c.UserAgent, "existing")
+		}
+	})
+}
+
+func TestWithHTTPClient_SetsClient(t *testing.T) {
+	t.Parallel()
+
+	hc := &http.Client{}
 	c := &client.Client{}
 
-	opt := client.WithBaseURL("   \t\n   ")
-	err := opt(c)
-	if err == nil {
-		t.Fatal("WithBaseURL() error = nil, want error")
+	if err := client.WithHTTPClient(hc)(c); err != nil {
+		t.Fatalf("WithHTTPClient() error = %v", err)
 	}
-	if err.Error() != "base URL cannot be empty" {
-		t.Fatalf("error = %q, want %q", err.Error(), "base URL cannot be empty")
+
+	if c.HTTPClient != hc {
+		t.Fatal("HTTPClient pointer differs from supplied client")
 	}
+}
+
+func TestWithHTTPTimeout_ZeroDisablesTimeout(t *testing.T) {
+	t.Parallel()
+
+	hc := &http.Client{Timeout: 5 * time.Second}
+	c := &client.Client{HTTPClient: hc}
+
+	if err := client.WithHTTPTimeout(0)(c); err != nil {
+		t.Fatalf("WithHTTPTimeout() error = %v", err)
+	}
+
+	if c.HTTPClient != hc {
+		t.Fatal("HTTPClient pointer was replaced")
+	}
+	if c.HTTPClient.Timeout != 0 {
+		t.Fatalf("HTTPClient.Timeout = %v, want 0", c.HTTPClient.Timeout)
+	}
+}
+
+func TestWithBackoff_DefaultsValuesIndependently(t *testing.T) {
+	t.Parallel()
+
+	t.Run("defaults initial only", func(t *testing.T) {
+		t.Parallel()
+
+		c := &client.Client{}
+
+		if err := client.WithBackoff(0, 2*time.Second)(c); err != nil {
+			t.Fatalf("WithBackoff() error = %v", err)
+		}
+
+		if c.InitialBackoff != 400*time.Millisecond {
+			t.Fatalf("InitialBackoff = %v, want 400ms", c.InitialBackoff)
+		}
+		if c.MaxBackoff != 2*time.Second {
+			t.Fatalf("MaxBackoff = %v, want 2s", c.MaxBackoff)
+		}
+	})
+
+	t.Run("defaults max only", func(t *testing.T) {
+		t.Parallel()
+
+		c := &client.Client{}
+
+		if err := client.WithBackoff(time.Second, 0)(c); err != nil {
+			t.Fatalf("WithBackoff() error = %v", err)
+		}
+
+		if c.InitialBackoff != time.Second {
+			t.Fatalf("InitialBackoff = %v, want 1s", c.InitialBackoff)
+		}
+		if c.MaxBackoff != 5*time.Second {
+			t.Fatalf("MaxBackoff = %v, want 5s", c.MaxBackoff)
+		}
+	})
 }
 
 func TestWithHTTPTimeout_CreatesHTTPClientWhenNil(t *testing.T) {
