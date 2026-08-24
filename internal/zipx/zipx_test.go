@@ -463,7 +463,7 @@ func TestUnzip_ParentSymlinkInsideRootAllowed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.Symlink(realDir, filepath.Join(dst, "link")); err != nil {
+	if err := os.Symlink("real", filepath.Join(dst, "link")); err != nil {
 		t.Fatal(err)
 	}
 
