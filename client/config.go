@@ -13,7 +13,7 @@ const (
 	defaultBaseURL = "https://api.lokalise.com/api2/"
 
 	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
-	defaultUserAgent = "lokex/3.0.0"
+	defaultUserAgent = "lokex/2.4.0"
 
 	// defaults for retry/backoff and HTTP timeouts.
 	defaultMaxRetries     = 3
