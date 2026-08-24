@@ -4,6 +4,6 @@ go 1.26
 
 require github.com/joho/godotenv v1.5.1
 
-require github.com/jarcoal/httpmock v1.4.1
+require github.com/jarcoal/httpmock v1.4.2
 
 require golang.org/x/sync v0.22.0
