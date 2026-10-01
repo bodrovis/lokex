@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,19 +39,6 @@ func (w *failAfterNWriter) Write(p []byte) (int, error) {
 
 	w.wrote += len(p)
 	return len(p), nil
-}
-
-type fakeReadCloser struct {
-	r        io.Reader
-	closeErr error
-}
-
-func (f *fakeReadCloser) Read(p []byte) (int, error) {
-	return f.r.Read(p)
-}
-
-func (f *fakeReadCloser) Close() error {
-	return f.closeErr
 }
 
 func TestWriteUploadJSON(t *testing.T) {

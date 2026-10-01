@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -20,10 +21,13 @@ func TestWithExpBackoff(t *testing.T) {
 
 		err := retry.WithExpBackoff(
 			context.Background(),
-			"",
-			3,
-			time.Millisecond,
-			time.Millisecond,
+			retry.ExpBackoffConfig{
+				Label:          "",
+				MaxRetries:     3,
+				InitialBackoff: time.Millisecond,
+				MaxBackoff:     time.Millisecond,
+				IsRetryable:    func(error) bool { return true },
+			},
 			func(attempt int) error {
 				calls++
 
@@ -33,9 +37,7 @@ func TestWithExpBackoff(t *testing.T) {
 
 				return nil
 			},
-			func(error) bool { return true },
 		)
-
 		if err != nil {
 			t.Fatalf("WithExpBackoff() error = %v", err)
 		}
@@ -51,10 +53,14 @@ func TestWithExpBackoff(t *testing.T) {
 
 			err := retry.WithExpBackoff(
 				t.Context(),
-				"",
-				3,
-				100*time.Millisecond,
-				time.Second,
+				retry.ExpBackoffConfig{
+					MaxRetries:     3,
+					InitialBackoff: 100 * time.Millisecond,
+					MaxBackoff:     time.Second,
+					IsRetryable: func(err error) bool {
+						return errors.Is(err, retryErr)
+					},
+				},
 				func(attempt int) error {
 					attempts = append(attempts, attempt)
 
@@ -64,17 +70,13 @@ func TestWithExpBackoff(t *testing.T) {
 
 					return nil
 				},
-				func(err error) bool {
-					return errors.Is(err, retryErr)
-				},
 			)
-
 			if err != nil {
 				t.Fatalf("WithExpBackoff() error = %v", err)
 			}
 
 			want := []int{0, 1, 2}
-			if len(attempts) != len(want) {
+			if !slices.Equal(attempts, want) {
 				t.Fatalf("attempts = %v, want %v", attempts, want)
 			}
 
@@ -92,15 +94,16 @@ func TestWithExpBackoff(t *testing.T) {
 
 		err := retry.WithExpBackoff(
 			context.Background(),
-			"",
-			3,
-			time.Millisecond,
-			time.Second,
-			func(attempt int) error {
+			retry.ExpBackoffConfig{
+				MaxRetries:     3,
+				InitialBackoff: time.Millisecond,
+				MaxBackoff:     time.Second,
+				IsRetryable:    func(error) bool { return false },
+			},
+			func(int) error {
 				calls++
 				return baseErr
 			},
-			func(error) bool { return false },
 		)
 
 		if !errors.Is(err, baseErr) {
@@ -121,15 +124,17 @@ func TestWithExpBackoff(t *testing.T) {
 
 			err := retry.WithExpBackoff(
 				t.Context(),
-				"download bundle",
-				2,
-				100*time.Millisecond,
-				time.Second,
-				func(attempt int) error {
+				retry.ExpBackoffConfig{
+					Label:          "download bundle",
+					MaxRetries:     2,
+					InitialBackoff: 100 * time.Millisecond,
+					MaxBackoff:     time.Second,
+					IsRetryable:    func(error) bool { return true },
+				},
+				func(int) error {
 					calls++
 					return baseErr
 				},
-				func(error) bool { return true },
 			)
 
 			if !errors.Is(err, baseErr) {
@@ -153,10 +158,11 @@ func TestWithExpBackoff(t *testing.T) {
 
 			err := retry.WithExpBackoff(
 				t.Context(),
-				"",
-				1,
-				100*time.Millisecond,
-				time.Second,
+				retry.ExpBackoffConfig{
+					MaxRetries:     1,
+					InitialBackoff: 100 * time.Millisecond,
+					MaxBackoff:     time.Second,
+				},
 				func(attempt int) error {
 					calls++
 
@@ -168,9 +174,7 @@ func TestWithExpBackoff(t *testing.T) {
 
 					return nil
 				},
-				nil,
 			)
-
 			if err != nil {
 				t.Fatalf("WithExpBackoff() error = %v", err)
 			}
@@ -188,15 +192,17 @@ func TestWithExpBackoff(t *testing.T) {
 
 		err := retry.WithExpBackoff(
 			ctx,
-			"download bundle",
-			2,
-			time.Millisecond,
-			10*time.Millisecond,
+			retry.ExpBackoffConfig{
+				Label:          "download bundle",
+				MaxRetries:     2,
+				InitialBackoff: time.Millisecond,
+				MaxBackoff:     10 * time.Millisecond,
+				IsRetryable:    func(error) bool { return true },
+			},
 			func(int) error {
 				called = true
 				return nil
 			},
-			func(error) bool { return true },
 		)
 
 		if !errors.Is(err, context.Canceled) {
@@ -225,15 +231,17 @@ func TestWithExpBackoff(t *testing.T) {
 
 			err := retry.WithExpBackoff(
 				ctx,
-				"download bundle",
-				2,
-				time.Second,
-				time.Second,
+				retry.ExpBackoffConfig{
+					Label:          "download bundle",
+					MaxRetries:     2,
+					InitialBackoff: time.Second,
+					MaxBackoff:     time.Second,
+					IsRetryable:    func(error) bool { return true },
+				},
 				func(int) error {
 					calls++
 					return errors.New("temporary failure")
 				},
-				func(error) bool { return true },
 			)
 
 			if !errors.Is(err, context.DeadlineExceeded) {
@@ -261,10 +269,12 @@ func TestWithExpBackoff(t *testing.T) {
 
 			err := retry.WithExpBackoff(
 				t.Context(),
-				"",
-				1,
-				time.Second,
-				time.Millisecond,
+				retry.ExpBackoffConfig{
+					MaxRetries:     1,
+					InitialBackoff: time.Second,
+					MaxBackoff:     time.Millisecond,
+					IsRetryable:    func(error) bool { return true },
+				},
 				func(attempt int) error {
 					calls++
 
@@ -282,9 +292,7 @@ func TestWithExpBackoff(t *testing.T) {
 
 					return nil
 				},
-				func(error) bool { return true },
 			)
-
 			if err != nil {
 				t.Fatalf("WithExpBackoff() error = %v", err)
 			}

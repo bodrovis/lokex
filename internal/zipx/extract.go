@@ -20,15 +20,13 @@ func (r stdZipReader) Files() []*zip.File {
 	return r.File
 }
 
-var (
-	openZipReader = func(path string) (zipReader, error) {
-		r, err := zip.OpenReader(path)
-		if err != nil {
-			return nil, err
-		}
-		return stdZipReader{r}, nil
+var openZipReader = func(path string) (zipReader, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
 	}
-)
+	return stdZipReader{r}, nil
+}
 
 // Unzip extracts srcZip into destDir according to policy p.
 // It enforces limits, prevents zip-slip, and skips unsafe entries.

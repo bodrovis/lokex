@@ -45,6 +45,30 @@ func PollProcesses(
 		return buildResults(ordered, processMap), nil
 	}
 
+	if err := pollUntilDone(
+		ctx,
+		pollCtx,
+		c,
+		processMap,
+		pending,
+		wait,
+		deadline,
+	); err != nil {
+		return nil, err
+	}
+
+	return buildResults(ordered, processMap), nil
+}
+
+func pollUntilDone(
+	ctx context.Context,
+	pollCtx context.Context,
+	c *client.Client,
+	processMap map[string]QueuedProcess,
+	pending map[string]struct{},
+	wait time.Duration,
+	deadline time.Time,
+) error {
 	const maxConcurrent = 6
 
 	timer := time.NewTimer(time.Hour)
@@ -53,7 +77,7 @@ func PollProcesses(
 
 	for len(pending) > 0 {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 
 		if pollBudgetExpired(deadline) {
@@ -68,16 +92,12 @@ func PollProcesses(
 		)
 
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return err
 		}
 
 		applyRound(processMap, pending, procs, errs)
 
-		if len(pending) == 0 {
-			break
-		}
-
-		if pollBudgetExpired(deadline) {
+		if len(pending) == 0 || pollBudgetExpired(deadline) {
 			break
 		}
 
@@ -93,7 +113,7 @@ func PollProcesses(
 			sleep,
 		)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if stopped {
 			break
@@ -102,7 +122,7 @@ func PollProcesses(
 		wait = nextPollWait(wait, deadline)
 	}
 
-	return buildResults(ordered, processMap), nil
+	return nil
 }
 
 func newPollContext(

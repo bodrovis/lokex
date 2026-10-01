@@ -215,7 +215,6 @@ func TestDoWithRetry(t *testing.T) {
 			},
 			func(error) bool { return true },
 		)
-
 		if err != nil {
 			t.Fatalf("DoWithRetry() error = %v", err)
 		}
@@ -358,7 +357,6 @@ func TestMakeAttemptOp(t *testing.T) {
 				return nil
 			},
 		)
-
 		if err != nil {
 			t.Fatalf("MakeAttemptOp() unexpected error = %v", err)
 		}

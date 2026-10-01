@@ -9,6 +9,14 @@ import (
 	"github.com/bodrovis/lokex/v2/internal/utils"
 )
 
+type ExpBackoffConfig struct {
+	Label          string
+	MaxRetries     int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+	IsRetryable    func(error) bool
+}
+
 // WithExpBackoff runs op with retries using exponential backoff + jitter.
 // MaxRetries is the number of retries after the initial attempt.
 // If isRetryable is nil, apierr.IsRetryable is used.
@@ -16,24 +24,25 @@ import (
 // wrapped with label context when label is provided.
 func WithExpBackoff(
 	ctx context.Context,
-	label string,
-	maxRetries int,
-	initialBackoff time.Duration,
-	maxBackoff time.Duration,
+	cfg ExpBackoffConfig,
 	op func(attempt int) error,
-	isRetryable func(error) bool,
 ) error {
-	isRetryable = resolveRetryable(isRetryable)
+	isRetryable := resolveRetryable(cfg.IsRetryable)
 
-	totalAttempts := maxRetries + 1
-	backoff := initialBackoff
+	totalAttempts := cfg.MaxRetries + 1
+	backoff := cfg.InitialBackoff
 
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
 
 	for attempt := 0; ; attempt++ {
-		if err := contextAttemptErr(ctx, label, attempt, totalAttempts); err != nil {
+		if err := contextAttemptErr(
+			ctx,
+			cfg.Label,
+			attempt,
+			totalAttempts,
+		); err != nil {
 			return err
 		}
 
@@ -42,20 +51,40 @@ func WithExpBackoff(
 			return nil
 		}
 
-		if err := contextAttemptErr(ctx, label, attempt, totalAttempts); err != nil {
+		if err := contextAttemptErr(
+			ctx,
+			cfg.Label,
+			attempt,
+			totalAttempts,
+		); err != nil {
 			return err
 		}
 
-		if shouldStopRetry(attempt, maxRetries, err, isRetryable) {
-			return wrapErr(label, attempt, totalAttempts, err)
+		if shouldStopRetry(
+			attempt,
+			cfg.MaxRetries,
+			err,
+			isRetryable,
+		) {
+			return wrapErr(
+				cfg.Label,
+				attempt,
+				totalAttempts,
+				err,
+			)
 		}
 
-		delay := computeRetryDelay(backoff, maxBackoff)
+		delay := computeRetryDelay(backoff, cfg.MaxBackoff)
 		if err := utils.SleepWithTimer(ctx, timer, delay); err != nil {
-			return wrapCtxErr(label, attempt, totalAttempts, err)
+			return wrapCtxErr(
+				cfg.Label,
+				attempt,
+				totalAttempts,
+				err,
+			)
 		}
 
-		backoff = nextBackoff(backoff, maxBackoff)
+		backoff = nextBackoff(backoff, cfg.MaxBackoff)
 	}
 }
 

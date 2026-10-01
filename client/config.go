@@ -13,7 +13,7 @@ const (
 	defaultBaseURL = "https://api.lokalise.com/api2/"
 
 	// defaultUserAgent is sent on every request unless overridden via WithUserAgent.
-	defaultUserAgent = "lokex/2.4.0"
+	defaultUserAgent = "lokex/2.4.1"
 
 	// defaults for retry/backoff and HTTP timeouts.
 	defaultMaxRetries     = 3
@@ -34,26 +34,35 @@ type Option func(*Client) error
 // The value must be an absolute URL; a trailing slash is enforced.
 func WithBaseURL(u string) Option {
 	return func(c *Client) error {
-		u = strings.TrimSpace(u)
-		if u == "" {
-			return errors.New("base URL cannot be empty")
+		baseURL, err := normalizeBaseURL(u)
+		if err != nil {
+			return err
 		}
 
-		parsed, err := url.Parse(u)
-		if err != nil ||
-			(parsed.Scheme != "http" && parsed.Scheme != "https") ||
-			parsed.Host == "" ||
-			parsed.Fragment != "" {
-			return errors.New("invalid base URL")
-		}
-
-		if !strings.HasSuffix(parsed.Path, "/") {
-			parsed.Path += "/"
-		}
-
-		c.BaseURL = parsed.String()
+		c.BaseURL = baseURL
 		return nil
 	}
+}
+
+func normalizeBaseURL(u string) (string, error) {
+	u = strings.TrimSpace(u)
+	if u == "" {
+		return "", errors.New("base URL cannot be empty")
+	}
+
+	parsed, err := url.Parse(u)
+	if err != nil ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.Host == "" ||
+		parsed.Fragment != "" {
+		return "", errors.New("invalid base URL")
+	}
+
+	if !strings.HasSuffix(parsed.Path, "/") {
+		parsed.Path += "/"
+	}
+
+	return parsed.String(), nil
 }
 
 // WithUserAgent overrides the default User-Agent string.
@@ -114,17 +123,15 @@ func WithMaxRetries(n int) Option {
 // If max < initial, max is promoted to initial.
 func WithBackoff(initial, max time.Duration) Option {
 	return func(c *Client) error {
-		if initial <= 0 {
-			initial = defaultInitialBackoff
-		}
-		if max <= 0 {
-			max = defaultMaxBackoff
-		}
-		if max < initial {
-			max = initial
-		}
-		c.InitialBackoff = initial
-		c.MaxBackoff = max
+		normalizedInitial, normalizedMax := normalizeDurationWindow(
+			initial,
+			max,
+			defaultInitialBackoff,
+			defaultMaxBackoff,
+		)
+
+		c.InitialBackoff = normalizedInitial
+		c.MaxBackoff = normalizedMax
 		return nil
 	}
 }
@@ -134,18 +141,34 @@ func WithBackoff(initial, max time.Duration) Option {
 // max is promoted to initial.
 func WithPollWait(initial, max time.Duration) Option {
 	return func(c *Client) error {
-		if initial <= 0 {
-			initial = defaultPollInitialWait
-		}
-		if max <= 0 {
-			max = defaultPollMaxWait
-		}
-		if max < initial {
-			max = initial
-		}
+		normalizedInitial, normalizedMax := normalizeDurationWindow(
+			initial,
+			max,
+			defaultPollInitialWait,
+			defaultPollMaxWait,
+		)
 
-		c.PollInitialWait = initial
-		c.PollMaxWait = max
+		c.PollInitialWait = normalizedInitial
+		c.PollMaxWait = normalizedMax
 		return nil
 	}
+}
+
+func normalizeDurationWindow(
+	initial time.Duration,
+	max time.Duration,
+	defaultInitial time.Duration,
+	defaultMax time.Duration,
+) (time.Duration, time.Duration) {
+	if initial <= 0 {
+		initial = defaultInitial
+	}
+	if max <= 0 {
+		max = defaultMax
+	}
+	if max < initial {
+		max = initial
+	}
+
+	return initial, max
 }

@@ -140,11 +140,13 @@ func (c *Client) WithExpBackoff(
 ) error {
 	return retry.WithExpBackoff(
 		ctx,
-		label,
-		c.MaxRetries,
-		c.InitialBackoff,
-		c.MaxBackoff,
+		retry.ExpBackoffConfig{
+			Label:          label,
+			MaxRetries:     c.MaxRetries,
+			InitialBackoff: c.InitialBackoff,
+			MaxBackoff:     c.MaxBackoff,
+			IsRetryable:    isRetryable,
+		},
 		op,
-		isRetryable,
 	)
 }

@@ -44,12 +44,14 @@ func DoWithRetry(
 
 	return WithExpBackoff(
 		ctx,
-		cfg.Label,
-		cfg.MaxRetries,
-		cfg.InitialBackoff,
-		cfg.MaxBackoff,
+		ExpBackoffConfig{
+			Label:          cfg.Label,
+			MaxRetries:     cfg.MaxRetries,
+			InitialBackoff: cfg.InitialBackoff,
+			MaxBackoff:     cfg.MaxBackoff,
+			IsRetryable:    isRetryable,
+		},
 		attemptOp,
-		isRetryable,
 	)
 }
 

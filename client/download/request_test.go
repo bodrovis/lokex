@@ -83,7 +83,11 @@ func TestDoDownloadRequest_Headers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DoDownloadRequest() error = %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("response body close error = %v", err)
+		}
+	}()
 }
 
 func TestDoDownloadRequest_RequestError(t *testing.T) {
