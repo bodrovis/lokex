@@ -384,7 +384,11 @@ func TestUnzip_AllowSymlinks_RejectsEmptyTarget(t *testing.T) {
 	}
 
 	zp := makeZip(t, []zentry{
-		{name: "empty-link", mode: os.ModeSymlink | 0o777, data: []byte(" \n\t ")},
+		{
+			name: "empty-link",
+			mode: os.ModeSymlink | 0o777,
+			data: []byte(""),
+		},
 	})
 
 	dst := t.TempDir()
@@ -393,10 +397,42 @@ func TestUnzip_AllowSymlinks_RejectsEmptyTarget(t *testing.T) {
 
 	err := zipx.Unzip(zp, dst, p)
 	if err == nil {
-		t.Fatalf("expected empty symlink target error, got nil")
+		t.Fatal("expected empty symlink target error, got nil")
 	}
 	if !strings.Contains(err.Error(), "empty symlink target") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUnzip_AllowSymlinks_PreservesWhitespace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink behavior is flaky on Windows")
+	}
+
+	target := " \n\t "
+
+	zp := makeZip(t, []zentry{
+		{
+			name: "whitespace-link",
+			mode: os.ModeSymlink | 0o777,
+			data: []byte(target),
+		},
+	})
+
+	dst := t.TempDir()
+	p := zipx.DefaultPolicy()
+	p.AllowSymlinks = true
+
+	if err := zipx.Unzip(zp, dst, p); err != nil {
+		t.Fatalf("Unzip() unexpected error: %v", err)
+	}
+
+	got, err := os.Readlink(filepath.Join(dst, "whitespace-link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != target {
+		t.Fatalf("symlink target = %q, want %q", got, target)
 	}
 }
 

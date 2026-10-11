@@ -25,7 +25,7 @@ jobs:
         cache: false
         
     - name: Run tests
-      run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./... -v -short -shuffle=on
+      run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./... -v -short -shuffle=on -race
     
     - uses: qltysh/qlty-action/coverage@c9b09987143d1e4ac955f4803c7bea742102feb5
       with:
