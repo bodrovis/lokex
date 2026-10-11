@@ -21,55 +21,71 @@ func pollRound(
 	pending map[string]struct{},
 	maxConcurrent int,
 ) ([]QueuedProcess, map[string]error) {
-	ids := make([]string, 0, len(pending))
-	for id := range pending {
-		ids = append(ids, id)
-	}
-
-	reqr := c.Requester()
-	resCh := make(chan pollResult, len(ids))
+	resCh := make(chan pollResult, len(pending))
 
 	var g errgroup.Group
 	g.SetLimit(maxConcurrent)
 
-	for _, id := range ids {
+	for id := range pending {
 		g.Go(func() error {
-			path := utils.ProjectPath(
-				c.ProjectID,
-				fmt.Sprintf("processes/%s", id),
-			)
-
-			var resp processResponse
-
-			if err := reqr.DoJSON(
-				ctx,
-				http.MethodGet,
-				path,
-				nil,
-				&resp,
-			); err != nil {
-				resCh <- pollResult{
-					id:  id,
-					err: err,
-				}
-				return nil
-			}
-
-			resCh <- pollResult{
-				id:   id,
-				proc: resp.ToQueuedProcess(),
-			}
-
+			resCh <- pollProcess(ctx, c, id)
 			return nil
 		})
 	}
 
-	// Workers report per-ID errors through resCh.
 	_ = g.Wait()
 	close(resCh)
 
-	procs := make([]QueuedProcess, 0, len(ids))
-	errs := make(map[string]error, len(ids))
+	return collectPollResults(resCh, len(pending))
+}
+
+func pollProcess(
+	ctx context.Context,
+	c *client.Client,
+	id string,
+) pollResult {
+	reqr := c.Requester()
+
+	path := utils.ProjectPath(
+		c.ProjectID,
+		fmt.Sprintf("processes/%s", id),
+	)
+
+	var resp processResponse
+
+	if err := reqr.DoJSON(
+		ctx,
+		http.MethodGet,
+		path,
+		nil,
+		&resp,
+	); err != nil {
+		return pollResult{id: id, err: err}
+	}
+
+	proc := resp.ToQueuedProcess()
+
+	if proc.ProcessID != "" && proc.ProcessID != id {
+		return pollResult{
+			id: id,
+			err: fmt.Errorf(
+				"process ID mismatch: requested %q, received %q",
+				id,
+				proc.ProcessID,
+			),
+		}
+	}
+
+	proc.ProcessID = id
+	return pollResult{id: id, proc: proc}
+}
+
+func collectPollResults(
+	resCh <-chan pollResult,
+	count int,
+) ([]QueuedProcess, map[string]error) {
+	procs := make([]QueuedProcess, 0, count)
+	errs := make(map[string]error)
 
 	for r := range resCh {
 		if r.err != nil {
@@ -90,20 +106,19 @@ func applyRound(
 	procs []QueuedProcess,
 	errs map[string]error,
 ) {
-	// Successful statuses update the latest view and remove terminal IDs.
 	for _, p := range procs {
 		processMap[p.ProcessID] = p
-		if p.Status == StatusFinished || p.Status == StatusFailed {
+
+		if p.Status == StatusFinished ||
+			p.Status == StatusFailed ||
+			p.Status == StatusCancelled {
 			delete(pending, p.ProcessID)
 		}
 	}
 
-	// Errors: retryable stays pending; non-retryable is marked failed and removed.
-	// Context cancellation/deadline errors are ignored here because the caller is stopping polling.
 	for id, err := range errs {
-		// defensive; PollProcesses should return ctx.Err earlier
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			// don't mark failed; caller asked to stop the whole poll
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
 			continue
 		}
 
@@ -111,7 +126,11 @@ func applyRound(
 			continue
 		}
 
-		processMap[id] = QueuedProcess{ProcessID: id, Status: StatusFailed}
+		p := processMap[id]
+		p.ProcessID = id
+		p.Err = err
+
+		processMap[id] = p
 		delete(pending, id)
 	}
 }

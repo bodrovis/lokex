@@ -23,6 +23,9 @@ func (r stdZipReader) Files() []*zip.File {
 var openZipReader = func(path string) (zipReader, error) {
 	r, err := zip.OpenReader(path)
 	if err != nil {
+		if r != nil {
+			_ = r.Close()
+		}
 		return nil, err
 	}
 	return stdZipReader{r}, nil
@@ -59,19 +62,15 @@ func Unzip(srcZip, destDir string, p Policy) (err error) {
 	var totalWritten int64
 
 	for _, f := range files {
-		n, err := extractEntry(f, root, p)
+		limit := entryByteLimit(p, totalWritten)
+
+		n, err := extractEntry(f, root, p, limit)
 		if err != nil {
 			return err
 		}
 
-		totalWritten += n
-
-		if p.MaxTotalBytes > 0 && totalWritten > p.MaxTotalBytes {
-			return fmt.Errorf(
-				"zip too large uncompressed (actual): %d > %d",
-				totalWritten,
-				p.MaxTotalBytes,
-			)
+		if p.MaxTotalBytes > 0 {
+			totalWritten += n
 		}
 	}
 

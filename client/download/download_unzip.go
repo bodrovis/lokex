@@ -40,6 +40,10 @@ func (d *Downloader) DownloadAndUnzip(ctx context.Context, bundleURL, destDir st
 		return err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	return unzipDownloadedBundle(tmpPath, destDir)
 }
 
@@ -57,18 +61,12 @@ func (d *Downloader) downloadAndUnzipPrecheck(
 		return nil, "", "", fmt.Errorf("download: context: %w", err)
 	}
 
-	bundleURL = strings.TrimSpace(bundleURL)
-	if bundleURL == "" {
-		return nil, "", "", fmt.Errorf("download: empty bundle url")
-	}
-
 	validatedURL, err := validateBundleURL(bundleURL)
 	if err != nil {
 		return nil, "", "", err
 	}
 
-	destDir = strings.TrimSpace(destDir)
-	if destDir == "" {
+	if strings.TrimSpace(destDir) == "" {
 		return nil, "", "", fmt.Errorf("download: empty dest dir")
 	}
 

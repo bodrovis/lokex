@@ -112,6 +112,8 @@ func attemptOpFromReadSeeker(
 	return attemptOp, nil
 }
 
+const maxBufferedBody int64 = 64 << 20
+
 func attemptOpFromBufferedBody(
 	body io.Reader,
 	op func(attempt int, body io.Reader) error,
@@ -119,7 +121,7 @@ func attemptOpFromBufferedBody(
 	var payload []byte
 
 	if body != nil {
-		b, err := io.ReadAll(body)
+		b, err := io.ReadAll(io.LimitReader(body, maxBufferedBody+1))
 
 		if cbody, ok := body.(io.Closer); ok {
 			_ = cbody.Close()
@@ -127,6 +129,13 @@ func attemptOpFromBufferedBody(
 
 		if err != nil {
 			return nil, fmt.Errorf("buffer request body: %w", err)
+		}
+
+		if int64(len(b)) > maxBufferedBody {
+			return nil, fmt.Errorf(
+				"request body exceeds %d-byte buffering limit; use io.ReadSeeker or retryBodyFactory",
+				maxBufferedBody,
+			)
 		}
 
 		payload = b

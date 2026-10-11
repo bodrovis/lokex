@@ -11,8 +11,9 @@ func extractEntry(
 	f *zip.File,
 	root *os.Root,
 	p Policy,
+	limit byteLimit,
 ) (int64, error) {
-	rel, mode, skip, err := prepareEntryTarget(f, p)
+	rel, mode, skip, err := prepareEntryTarget(f, limit)
 	if err != nil || skip {
 		return 0, err
 	}
@@ -21,24 +22,24 @@ func extractEntry(
 		return 0, extractDirEntry(f, root, rel, p)
 	}
 
-	if err := prepareParentDir(root, rel); err != nil {
-		return 0, err
-	}
-
 	if isSpecialFileMode(mode) {
 		return 0, nil
 	}
 
-	if mode&os.ModeSymlink != 0 {
-		return 0, extractSymlinkEntry(f, root, rel, p)
+	if err := prepareParentDir(root, rel); err != nil {
+		return 0, err
 	}
 
-	return extractRegularFileEntry(f, root, rel, p)
+	if mode&os.ModeSymlink != 0 {
+		return extractSymlinkEntry(f, root, rel, p, limit)
+	}
+
+	return extractRegularFileEntry(f, root, rel, p, limit)
 }
 
 func prepareEntryTarget(
 	f *zip.File,
-	p Policy,
+	limit byteLimit,
 ) (rel string, mode os.FileMode, skip bool, err error) {
 	rel, err = normalizeZipEntryPath(f.Name)
 	if err != nil {
@@ -49,7 +50,7 @@ func prepareEntryTarget(
 		return "", 0, true, nil
 	}
 
-	if p.MaxFileBytes > 0 && int64(f.UncompressedSize64) > p.MaxFileBytes {
+	if limit.enabled && f.UncompressedSize64 > uint64(limit.max) {
 		return "", 0, false, fmt.Errorf(
 			"zip entry too big by header: %s (%d bytes)",
 			f.Name,

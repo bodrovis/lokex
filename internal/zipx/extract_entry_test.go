@@ -28,10 +28,8 @@ func TestExtractEntry(t *testing.T) {
 		}()
 
 		f := &zip.File{
-			FileHeader: zip.FileHeader{
-				Name:   "pipe",
-				Method: zip.Store,
-			},
+			Name:   "pipe",
+			Method: zip.Store,
 		}
 		f.SetMode(os.ModeNamedPipe)
 
@@ -39,6 +37,7 @@ func TestExtractEntry(t *testing.T) {
 			f,
 			root,
 			zipx.DefaultPolicy(),
+			0,
 		)
 		if err != nil {
 			t.Fatalf("ExtractEntry() unexpected error = %v", err)
@@ -61,14 +60,13 @@ func TestPrepareEntryTarget(t *testing.T) {
 		t.Parallel()
 
 		f := &zip.File{
-			FileHeader: zip.FileHeader{
-				Name: ".",
-			},
+			Name: ".",
 		}
 
 		rel, mode, skip, err := zipx.ExportPrepareEntryTarget(
 			f,
 			zipx.DefaultPolicy(),
+			0,
 		)
 		if err != nil {
 			t.Fatalf("PrepareEntryTarget() unexpected error = %v", err)
@@ -91,14 +89,13 @@ func TestPrepareEntryTarget(t *testing.T) {
 		t.Parallel()
 
 		f := &zip.File{
-			FileHeader: zip.FileHeader{
-				Name: "../evil.txt",
-			},
+			Name: "../evil.txt",
 		}
 
 		_, _, skip, err := zipx.ExportPrepareEntryTarget(
 			f,
 			zipx.DefaultPolicy(),
+			0,
 		)
 
 		if err == nil {
@@ -114,16 +111,14 @@ func TestPrepareEntryTarget(t *testing.T) {
 		t.Parallel()
 
 		f := &zip.File{
-			FileHeader: zip.FileHeader{
-				Name:               "large.bin",
-				UncompressedSize64: 101,
-			},
+			Name:               "large.bin",
+			UncompressedSize64: 101,
 		}
 
 		p := zipx.DefaultPolicy()
 		p.MaxFileBytes = 100
 
-		_, _, skip, err := zipx.ExportPrepareEntryTarget(f, p)
+		_, _, skip, err := zipx.ExportPrepareEntryTarget(f, p, 0)
 
 		if err == nil {
 			t.Fatal("PrepareEntryTarget() error = nil, want non-nil")
@@ -162,9 +157,7 @@ func TestExtractDirEntry(t *testing.T) {
 	}()
 
 	f := &zip.File{
-		FileHeader: zip.FileHeader{
-			Name: "blocked/dir/",
-		},
+		Name: "blocked/dir/",
 	}
 
 	err = zipx.ExportExtractDirEntry(

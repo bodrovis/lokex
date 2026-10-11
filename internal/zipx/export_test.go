@@ -12,12 +12,16 @@ type ExportZipReader interface {
 	Files() []*zip.File
 }
 
-func ExportCopyCapped(
+func ExportCopyWithLimit(
 	dst io.Writer,
 	src io.Reader,
 	max int64,
+	enabled bool,
 ) (int64, error) {
-	return copyCapped(dst, src, max)
+	return copyWithLimit(dst, src, byteLimit{
+		max:     max,
+		enabled: enabled,
+	})
 }
 
 func ExportPrepareExtractionRoot(destDir string) (*os.Root, error) {
@@ -42,15 +46,17 @@ func ExportExtractEntry(
 	f *zip.File,
 	root *os.Root,
 	p Policy,
+	totalWritten int64,
 ) (int64, error) {
-	return extractEntry(f, root, p)
+	return extractEntry(f, root, p, entryByteLimit(p, totalWritten))
 }
 
 func ExportPrepareEntryTarget(
 	f *zip.File,
 	p Policy,
+	totalWritten int64,
 ) (string, os.FileMode, bool, error) {
-	return prepareEntryTarget(f, p)
+	return prepareEntryTarget(f, entryByteLimit(p, totalWritten))
 }
 
 func ExportExtractDirEntry(
@@ -67,8 +73,11 @@ func ExportExtractRegularFileEntry(
 	root *os.Root,
 	rel string,
 	p Policy,
+	totalWritten int64,
 ) (int64, error) {
-	return extractRegularFileEntry(f, root, rel, p)
+	return extractRegularFileEntry(
+		f, root, rel, p, entryByteLimit(p, totalWritten),
+	)
 }
 
 func ExportFilePermOrDefault(mode os.FileMode) os.FileMode {
@@ -78,9 +87,8 @@ func ExportFilePermOrDefault(mode os.FileMode) os.FileMode {
 func ExportCreateTempOutputFile(
 	root *os.Root,
 	rel string,
-	perm os.FileMode,
 ) (*os.File, string, error) {
-	return createTempOutputFile(root, rel, perm)
+	return createTempOutputFile(root, rel)
 }
 
 func ExportCloseWithPrecedence(
@@ -115,12 +123,21 @@ func ExportExtractSymlinkEntry(
 	root *os.Root,
 	rel string,
 	p Policy,
-) error {
-	return extractSymlinkEntry(f, root, rel, p)
+	totalWritten int64,
+) (int64, error) {
+	return extractSymlinkEntry(
+		f, root, rel, p, entryByteLimit(p, totalWritten),
+	)
 }
 
-func ExportReadSymlinkTarget(f *zip.File) (string, error) {
-	return readSymlinkTarget(f)
+func ExportReadSymlinkTarget(
+	f *zip.File,
+	p Policy,
+	totalWritten int64,
+) (string, int64, error) {
+	return readSymlinkTarget(
+		f, entryByteLimit(p, totalWritten),
+	)
 }
 
 func ExportValidateSymlinkTargetString(

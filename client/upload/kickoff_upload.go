@@ -33,8 +33,7 @@ func (u *Uploader) kickoffUploadStreaming(ctx context.Context, body UploadParams
 		ctx = context.Background()
 	}
 
-	cleanPath = strings.TrimSpace(cleanPath)
-	if cleanPath == "" {
+	if strings.TrimSpace(cleanPath) == "" {
 		if _, has := body["data"]; !has {
 			return "", errors.New("upload: kickoff: missing local file path and 'data'")
 		}

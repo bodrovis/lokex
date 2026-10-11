@@ -15,6 +15,8 @@ type syncCloseFile interface {
 	Close() error
 }
 
+const maxDownloadBytes int64 = 2 << 30 // 2 GiB
+
 // writeHTTPBodyAtomically writes src to a temporary file next to destPath
 // and moves it into place only after the complete body has been written,
 // validated, synced, and closed.
@@ -65,13 +67,27 @@ func cleanupTempFile(tmp *os.File, tmpName string, closed *bool, retErr *error) 
 }
 
 func copyAndValidate(tmp syncCloseFile, src io.Reader, wantLen int64) error {
-	n, err := io.Copy(tmp, src)
+	if wantLen > maxDownloadBytes {
+		return fmt.Errorf(
+			"download: archive exceeds 2 GiB limit (Content-Length: %d)",
+			wantLen,
+		)
+	}
+
+	n, err := io.Copy(tmp, io.LimitReader(src, maxDownloadBytes+1))
 	if err != nil {
 		return fmt.Errorf("write zip: %w", err)
 	}
 
+	if n > maxDownloadBytes {
+		return fmt.Errorf("download: archive exceeds 2 GiB limit")
+	}
+
 	if wantLen >= 0 && n != wantLen {
-		return fmt.Errorf("incomplete download: got %d of %d: %w", n, wantLen, io.ErrUnexpectedEOF)
+		return fmt.Errorf(
+			"incomplete download: got %d of %d: %w",
+			n, wantLen, io.ErrUnexpectedEOF,
+		)
 	}
 
 	if err := tmp.Sync(); err != nil {
@@ -81,15 +97,15 @@ func copyAndValidate(tmp syncCloseFile, src io.Reader, wantLen int64) error {
 	return nil
 }
 
-func finalizeAtomicWrite(tmp syncCloseFile, tmpName, destPath string, closed *bool) error {
+func finalizeAtomicWrite(
+	tmp syncCloseFile,
+	tmpName, destPath string,
+	closed *bool,
+) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close zip: %w", err)
 	}
 	*closed = true
-
-	// On Windows, rename over an existing file can be unreliable; remove first.
-	// Ignore remove error: destination may not exist yet.
-	_ = os.Remove(destPath)
 
 	if err := renameFile(tmpName, destPath); err != nil {
 		return fmt.Errorf("finalize zip: %w", err)

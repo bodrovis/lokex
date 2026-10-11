@@ -10,7 +10,6 @@ package upload
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -126,7 +125,7 @@ func (u *Uploader) uploadSingle(ctx context.Context, params UploadParams, srcPat
 
 	processID, err := kickoffUploadStreamingFn(u, ctx, body, readPath)
 	if err != nil {
-		return handleUploadKickoffError(err, poll)
+		return "", err
 	}
 
 	return processID, nil
@@ -144,15 +143,19 @@ func validateUploadSingleInput(u *Uploader, ctx context.Context) error {
 	return nil
 }
 
-func resolveUploadReadPath(body UploadParams, srcPath, filename string) (string, error) {
+func resolveUploadReadPath(
+	body UploadParams,
+	srcPath, filename string,
+) (string, error) {
 	if _, hasData := body["data"]; hasData {
 		return "", nil
 	}
 
-	readPath := strings.TrimSpace(srcPath)
-	if readPath == "" {
+	readPath := srcPath
+	if strings.TrimSpace(readPath) == "" {
 		readPath = filename
 	}
+
 	readPath = filepath.Clean(readPath)
 
 	if err := ensureFileIsRegular(readPath); err != nil {
@@ -160,14 +163,4 @@ func resolveUploadReadPath(body UploadParams, srcPath, filename string) (string,
 	}
 
 	return readPath, nil
-}
-
-func handleUploadKickoffError(err error, poll bool) (string, error) {
-	if errors.Is(err, ErrNoProcessID) {
-		if poll {
-			return "", fmt.Errorf("upload: polling requested but unavailable: %w", err)
-		}
-		return "", nil
-	}
-	return "", err
 }

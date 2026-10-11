@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bodrovis/lokex/v2/client/internal/transport"
@@ -41,8 +43,9 @@ func TestRequester_Do(t *testing.T) {
 		t.Parallel()
 
 		r := &transport.Requester{
-			BaseURL: "http://[::1",
-			Token:   "tok",
+			BaseURL:    "http://[::1",
+			Token:      "tok",
+			HTTPClient: &http.Client{},
 		}
 
 		err := transport.ExportDo(
@@ -518,5 +521,126 @@ func TestRequester_DoJSON_HTTPClientError(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "send request") {
 		t.Fatalf("DoJSON() error = %q, want send request context", err)
+	}
+}
+
+func TestRequester_RedirectSameOrigin(t *testing.T) {
+	t.Parallel()
+
+	var gotToken string
+
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/start":
+				http.Redirect(w, r, "/finish", http.StatusFound)
+			case "/finish":
+				gotToken = r.Header.Get("X-Api-Token")
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				http.NotFound(w, r)
+			}
+		},
+	))
+	defer server.Close()
+
+	r := &transport.Requester{
+		BaseURL:    server.URL + "/",
+		Token:      "secret-token",
+		HTTPClient: server.Client(),
+	}
+
+	err := r.DoJSON(
+		context.Background(),
+		http.MethodGet,
+		"start",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("DoJSON() unexpected error = %v", err)
+	}
+
+	if gotToken != "secret-token" {
+		t.Fatalf("token = %q, want %q", gotToken, "secret-token")
+	}
+}
+
+func TestRequester_RedirectCrossOrigin(t *testing.T) {
+	t.Parallel()
+
+	var received atomic.Int32
+
+	target := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			received.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+		},
+	))
+	defer target.Close()
+
+	source := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(
+				w,
+				r,
+				target.URL+"/steal",
+				http.StatusFound,
+			)
+		},
+	))
+	defer source.Close()
+
+	r := &transport.Requester{
+		BaseURL:    source.URL + "/",
+		Token:      "secret-token",
+		HTTPClient: source.Client(),
+	}
+
+	err := r.DoJSON(
+		context.Background(),
+		http.MethodGet,
+		"start",
+		nil,
+		nil,
+	)
+
+	if err == nil {
+		t.Fatal("DoJSON() error = nil, want redirect error")
+	}
+
+	if received.Load() != 0 {
+		t.Fatal("cross-origin redirect reached target server")
+	}
+}
+
+func TestRequester_NilHTTPClientClosesBody(t *testing.T) {
+	t.Parallel()
+
+	closed := false
+	body := &closeTrackingReader{
+		r:      strings.NewReader(`{"x":1}`),
+		closed: &closed,
+	}
+
+	r := &transport.Requester{
+		BaseURL: "https://example.com/",
+		Token:   "tok",
+	}
+
+	err := r.DoJSON(
+		context.Background(),
+		http.MethodPost,
+		"test",
+		body,
+		nil,
+	)
+
+	if err == nil {
+		t.Fatal("DoJSON() error = nil, want non-nil")
+	}
+
+	if !closed {
+		t.Fatal("body was not closed")
 	}
 }

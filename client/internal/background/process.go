@@ -11,6 +11,7 @@ type QueuedProcess struct {
 	Status      string `json:"status"`
 	DownloadURL string `json:"download_url,omitempty"`
 	Message     string `json:"message,omitempty"`
+	Err         error  `json:"-"`
 }
 
 // processResponse mirrors the subset of the Lokalise response we care about.

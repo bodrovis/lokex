@@ -85,13 +85,13 @@ func TestDownloadOncePrecheck(t *testing.T) {
 			wantErr:    "download: empty dest path",
 		},
 		{
-			name:         "success trims inputs",
+			name:         "success does not trim inputs",
 			downloader:   download.NewDownloader(mustClient(&http.Client{})),
 			ctx:          context.Background(),
 			urlStr:       "  https://example.com/file.zip  ",
 			destPath:     "  /tmp/file.zip  ",
 			wantURL:      "https://example.com/file.zip",
-			wantDestPath: "/tmp/file.zip",
+			wantDestPath: "  /tmp/file.zip  ",
 		},
 	}
 

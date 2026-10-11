@@ -21,8 +21,7 @@ func cloneAndValidateParams(params UploadParams) (UploadParams, string, error) {
 		return nil, "", errors.New("upload: 'filename' must be a non-empty string")
 	}
 
-	name = strings.TrimSpace(name)
-	if name == "" {
+	if strings.TrimSpace(name) == "" {
 		return nil, "", errors.New("upload: 'filename' must be a non-empty string")
 	}
 

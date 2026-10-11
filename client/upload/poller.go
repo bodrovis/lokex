@@ -27,8 +27,7 @@ func (u *Uploader) pollUntilFinished(ctx context.Context, processID string) (str
 		return "", fmt.Errorf("upload: no process results returned (process_id=%s)", processID)
 	}
 
-	p := results[0]
-	return handleProcessStatus(processID, p.Status, p.Message)
+	return handleProcessResult(processID, results[0])
 }
 
 func handleProcessStatus(processID, status, message string) (string, error) {
@@ -38,13 +37,34 @@ func handleProcessStatus(processID, status, message string) (string, error) {
 	case background.StatusFinished:
 		return processID, nil
 
-	case background.StatusFailed:
+	case background.StatusFailed, background.StatusCancelled:
 		if msg := strings.TrimSpace(message); msg != "" {
-			return "", fmt.Errorf("upload: process %s failed: %s", processID, msg)
+			return "", fmt.Errorf(
+				"upload: process %s %s: %s",
+				processID, st, msg,
+			)
 		}
-		return "", fmt.Errorf("upload: process %s failed", processID)
+		return "", fmt.Errorf("upload: process %s %s", processID, st)
 
 	default:
-		return "", fmt.Errorf("upload: process %s did not finish (status=%q)", processID, st)
+		return "", fmt.Errorf(
+			"upload: process %s did not finish (status=%q)",
+			processID, st,
+		)
 	}
+}
+
+func handleProcessResult(
+	processID string,
+	p background.QueuedProcess,
+) (string, error) {
+	if p.Err != nil {
+		return "", fmt.Errorf(
+			"upload: process %s polling failed: %w",
+			processID,
+			p.Err,
+		)
+	}
+
+	return handleProcessStatus(processID, p.Status, p.Message)
 }

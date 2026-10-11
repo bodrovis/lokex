@@ -2,11 +2,11 @@ package zipx
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 var (
@@ -24,57 +24,67 @@ func extractSymlinkEntry(
 	root *os.Root,
 	rel string,
 	p Policy,
-) error {
+	limit byteLimit,
+) (int64, error) {
 	if !p.AllowSymlinks {
-		return nil
+		return 0, nil
 	}
 
-	linkTarget, err := readSymlinkTarget(f)
+	linkTarget, n, err := readSymlinkTarget(f, limit)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	if err := validateSymlinkTargetString(f.Name, linkTarget); err != nil {
-		return err
+		return 0, err
 	}
 
 	if err := validateSymlinkPlacement(f.Name, rel, linkTarget); err != nil {
-		return err
+		return 0, err
 	}
-
-	// Remove an existing entry before creating the symlink.
-	_ = root.Remove(rel)
 
 	if err := symlinkFn(root, linkTarget, rel); err != nil {
-		return fmt.Errorf("create symlink: %w", err)
+		return 0, fmt.Errorf("create symlink: %w", err)
 	}
 
-	return nil
+	return n, nil
 }
 
-func readSymlinkTarget(f *zip.File) (string, error) {
+func readSymlinkTarget(
+	f *zip.File,
+	limit byteLimit,
+) (target string, size int64, retErr error) {
 	rc, err := f.Open()
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
+
 	defer func() {
-		_ = rc.Close()
+		if err := rc.Close(); err != nil {
+			retErr = errors.Join(
+				retErr,
+				fmt.Errorf("close symlink target: %w", err),
+			)
+		}
 	}()
 
-	const maxLinkTarget = 1 << 20 // 1 MiB safety cap
+	const maxLinkTarget int64 = 1 << 20
 
-	linkTargetBytes, err := readAllFn(
-		io.LimitReader(rc, maxLinkTarget+1),
-	)
+	cap := maxLinkTarget
+	if limit.enabled && limit.max < cap {
+		cap = limit.max
+	}
+
+	data, err := readAllFn(io.LimitReader(rc, cap+1))
 	if err != nil {
-		return "", fmt.Errorf("read symlink target: %w", err)
+		return "", 0, fmt.Errorf("read symlink target: %w", err)
 	}
 
-	if len(linkTargetBytes) > maxLinkTarget {
-		return "", fmt.Errorf("symlink target too large")
+	if int64(len(data)) > cap {
+		return "", 0, fmt.Errorf("symlink target exceeds size limit")
 	}
 
-	return strings.TrimSpace(string(linkTargetBytes)), nil
+	return string(data), int64(len(data)), nil
 }
 
 func validateSymlinkTargetString(entryName, linkTarget string) error {

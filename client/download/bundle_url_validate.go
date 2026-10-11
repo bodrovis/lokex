@@ -46,13 +46,21 @@ func validateParsedURL(u *url.URL) error {
 }
 
 func validateHost(host string) error {
-	host = strings.ToLower(host)
+	host = strings.ToLower(strings.TrimRight(host, "."))
+
 	if host == "" {
 		return fmt.Errorf("download: url has empty hostname")
 	}
+
+	// IPv6 zone identifiers are not allowed.
+	if strings.Contains(host, "%") {
+		return fmt.Errorf("download: hostname must not contain zone identifiers")
+	}
+
 	if host == "localhost" {
 		return fmt.Errorf("download: localhost is not allowed")
 	}
+
 	if strings.HasSuffix(host, ".localhost") ||
 		strings.HasSuffix(host, ".local") ||
 		strings.HasSuffix(host, ".internal") {
@@ -106,6 +114,10 @@ var blockedNets = []*net.IPNet{
 	mustCIDR("fc00::/7"),  // unique local v6
 	mustCIDR("::/128"),    // unspecified v6
 	mustCIDR("ff00::/8"),  // multicast v6
+	mustCIDR("0.0.0.0/8"),
+	mustCIDR("100.64.0.0/10"),
+	mustCIDR("198.18.0.0/15"),
+	mustCIDR("240.0.0.0/4"),
 }
 
 func mustCIDR(s string) *net.IPNet {

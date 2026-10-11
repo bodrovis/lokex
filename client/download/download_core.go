@@ -30,8 +30,8 @@ type Downloader struct {
 	client *client.Client
 }
 
-// DownloadParams represents the JSON body for /files/download and /files/async-download.
-// It's a thin alias so callers can pass a map with a clearer domain-specific type.
+// DownloadParams represents the JSON body for download requests.
+// It is a named map type for export parameters.
 type DownloadParams map[string]any
 
 // FetchFunc abstracts the "fetch bundle URL" step so Download and DownloadAsync

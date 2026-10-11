@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 )
@@ -127,13 +128,28 @@ func uploadDataReader(
 		if err != nil {
 			return nil, nil, err
 		}
+
+		fi, err := f.Stat()
+		if err != nil {
+			_ = f.Close()
+			return nil, nil, err
+		}
+
+		if !fi.Mode().IsRegular() {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf(
+				"upload: %q is not a regular file",
+				cleanPath,
+			)
+		}
+
 		return f, f.Close, nil
 
 	case spec.dataWasBytes:
 		return bytes.NewReader(spec.dataBytes), nil, nil
 
 	default:
-		return nil, nil, nil
+		return nil, nil, errors.New("upload: invalid upload data specification")
 	}
 }
 

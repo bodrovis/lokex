@@ -582,3 +582,70 @@ func TestAttemptOpFromBufferedBody(t *testing.T) {
 		}
 	})
 }
+
+func TestAttemptOpFromBufferedBodyLimit(t *testing.T) {
+	const limit int64 = 64 << 20
+
+	t.Run("body at exact limit is allowed", func(t *testing.T) {
+		body := io.LimitReader(zeroReader{}, limit)
+
+		attemptOp, err := retry.ExportAttemptOpFromBufferedBody(
+			body,
+			func(_ int, rdr io.Reader) error {
+				n, err := io.Copy(io.Discard, rdr)
+				if err != nil {
+					return err
+				}
+				if n != limit {
+					t.Fatalf("copied %d bytes, want %d", n, limit)
+				}
+				return nil
+			},
+		)
+		if err != nil {
+			t.Fatalf("unexpected error = %v", err)
+		}
+
+		for i := 1; i <= 2; i++ {
+			if err := attemptOp(i); err != nil {
+				t.Fatalf("attempt %d: %v", i, err)
+			}
+		}
+	})
+
+	t.Run("body exceeding limit is rejected and closed", func(t *testing.T) {
+		closed := false
+		body := &closeTrackingReader{
+			r:      io.LimitReader(zeroReader{}, limit+1),
+			closed: &closed,
+		}
+
+		attemptOp, err := retry.ExportAttemptOpFromBufferedBody(
+			body,
+			func(_ int, _ io.Reader) error {
+				t.Fatal("op should not be called")
+				return nil
+			},
+		)
+
+		if err == nil {
+			t.Fatal("expected buffering limit error")
+		}
+		if !strings.Contains(err.Error(), "buffering limit") {
+			t.Fatalf("unexpected error = %v", err)
+		}
+		if attemptOp != nil {
+			t.Fatal("attemptOp != nil, want nil")
+		}
+		if !closed {
+			t.Fatal("body was not closed after exceeding limit")
+		}
+	})
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}

@@ -460,31 +460,38 @@ func TestUploader_Upload_ReadFileError(t *testing.T) {
 	}
 }
 
-func TestUploader_Upload_EmptyProcessID_NoPoll_NoError(t *testing.T) {
+func TestUploader_Upload_EmptyProcessID_NoPoll_Error(t *testing.T) {
 	httpmock.Activate()
 	defer httpmock.DeactivateAndReset()
 
-	targetPost := fmt.Sprintf("https://api.lokalise.com/api2/projects/%s/files/upload", projectID)
+	targetPost := fmt.Sprintf(
+		"https://api.lokalise.com/api2/projects/%s/files/upload",
+		projectID,
+	)
 	httpmock.RegisterResponder("POST", targetPost,
 		httpmock.NewStringResponder(200, `{"process":{"process_id":""}}`),
 	)
 
-	cli, _ := client.NewClient(token, projectID, nil)
+	cli, _ := client.NewClient(token, projectID)
 	u := upload.NewUploader(cli)
 
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "en.json")
-	_ = os.WriteFile(fp, []byte("{}"), 0o644)
+	if err := os.WriteFile(fp, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	processID, err := u.Upload(context.Background(), upload.UploadParams{
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", false)
-	if err != nil {
-		t.Fatalf("want no error when poll=false and process id is empty, got %v", err)
+
+	if !errors.Is(err, upload.ErrNoProcessID) {
+		t.Fatalf("error = %v, want ErrNoProcessID", err)
 	}
+
 	if processID != "" {
-		t.Fatalf("want empty process id, got %q", processID)
+		t.Fatalf("processID = %q, want empty", processID)
 	}
 }
 
@@ -508,11 +515,9 @@ func TestUploader_Upload_EmptyProcessID_WithPoll_Error(t *testing.T) {
 		"filename": fp,
 		"lang_iso": "en",
 	}, "", true)
-	if err == nil {
-		t.Fatal("want error when poll=true and process id is empty, got nil")
-	}
-	if !strings.Contains(err.Error(), "polling requested but unavailable") {
-		t.Fatalf("want polling unavailable error, got %v", err)
+
+	if !errors.Is(err, upload.ErrNoProcessID) {
+		t.Fatalf("error = %v, want ErrNoProcessID", err)
 	}
 }
 

@@ -206,7 +206,7 @@ func TestIntegration_UploadBatch_PartialFailure(t *testing.T) {
 	}
 
 	// First two should succeed.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got.Items[i].Err != nil {
 			t.Fatalf("item[%d].Err = %v, want nil", i, got.Items[i].Err)
 		}

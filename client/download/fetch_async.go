@@ -86,22 +86,37 @@ func (d *Downloader) pollAsyncDownloadProcess(ctx context.Context, pid string) (
 }
 
 func interpretAsyncDownloadProcess(p background.QueuedProcess) (string, error) {
+	if p.Err != nil {
+		return "", fmt.Errorf(
+			"fetch bundle async: process %s polling failed: %w",
+			p.ProcessID,
+			p.Err,
+		)
+	}
+
 	st := strings.ToLower(strings.TrimSpace(p.Status))
 
 	switch st {
 	case background.StatusFinished:
 		return finishedAsyncDownloadURL(p)
 
-	case background.StatusFailed:
-		return "", failedAsyncDownloadErr(p)
+	case background.StatusFailed, background.StatusCancelled:
+		msg := strings.TrimSpace(p.Message)
+		if msg != "" {
+			return "", fmt.Errorf(
+				"fetch bundle async: process %s %s: %s",
+				p.ProcessID, st, msg,
+			)
+		}
+		return "", fmt.Errorf(
+			"fetch bundle async: process %s %s",
+			p.ProcessID, st,
+		)
 
 	default:
-		// Usually means we ran out of polling budget (PollMaxWait) but ctx might still be alive,
-		// or Lokalise is slow and never reached terminal before our poll deadline.
 		return "", fmt.Errorf(
 			"fetch bundle async: process %s did not finish (status=%q)",
-			p.ProcessID,
-			st,
+			p.ProcessID, st,
 		)
 	}
 }
@@ -109,7 +124,15 @@ func interpretAsyncDownloadProcess(p background.QueuedProcess) (string, error) {
 func finishedAsyncDownloadURL(p background.QueuedProcess) (string, error) {
 	u := strings.TrimSpace(p.DownloadURL)
 	if u != "" {
-		return u, nil
+		validatedURL, err := validateBundleURL(u)
+		if err != nil {
+			return "", fmt.Errorf(
+				"fetch bundle async: process %s invalid download URL: %w",
+				p.ProcessID,
+				err,
+			)
+		}
+		return validatedURL, nil
 	}
 
 	msg := strings.TrimSpace(p.Message)
@@ -125,13 +148,4 @@ func finishedAsyncDownloadURL(p background.QueuedProcess) (string, error) {
 		"fetch bundle async: process %s finished but download_url is empty",
 		p.ProcessID,
 	)
-}
-
-func failedAsyncDownloadErr(p background.QueuedProcess) error {
-	msg := strings.TrimSpace(p.Message)
-	if msg != "" {
-		return fmt.Errorf("fetch bundle async: process %s failed: %s", p.ProcessID, msg)
-	}
-
-	return fmt.Errorf("fetch bundle async: process %s failed", p.ProcessID)
 }

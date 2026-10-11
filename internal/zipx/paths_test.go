@@ -190,7 +190,7 @@ func FuzzNormalizeZipEntryPath(f *testing.F) {
 			t.Fatalf("got absolute path %q", got)
 		}
 
-		for _, seg := range strings.Split(filepath.ToSlash(got), "/") {
+		for seg := range strings.SplitSeq(filepath.ToSlash(got), "/") {
 			if seg == ".." {
 				t.Fatalf("got %q contains parent traversal segment", got)
 			}

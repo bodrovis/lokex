@@ -219,11 +219,52 @@ func TestWithHTTPTimeout_ZeroDisablesTimeout(t *testing.T) {
 		t.Fatalf("WithHTTPTimeout() error = %v", err)
 	}
 
-	if c.HTTPClient != hc {
-		t.Fatal("HTTPClient pointer was replaced")
+	if c.HTTPClient == hc {
+		t.Fatal("HTTPClient pointer was not replaced")
 	}
 	if c.HTTPClient.Timeout != 0 {
 		t.Fatalf("HTTPClient.Timeout = %v, want 0", c.HTTPClient.Timeout)
+	}
+	if hc.Timeout != 5*time.Second {
+		t.Fatalf("original HTTPClient.Timeout = %v, want 5s", hc.Timeout)
+	}
+}
+
+func TestWithHTTPTimeoutDoesNotMutateProvidedClient(t *testing.T) {
+	t.Parallel()
+
+	transport := &http.Transport{}
+	t.Cleanup(transport.CloseIdleConnections)
+
+	original := &http.Client{
+		Transport: transport,
+		Timeout:   10 * time.Second,
+	}
+
+	c, err := client.NewClient(
+		"token",
+		"project",
+		client.WithHTTPClient(original),
+		client.WithHTTPTimeout(30*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if original.Timeout != 10*time.Second {
+		t.Fatalf("original timeout changed: %v", original.Timeout)
+	}
+
+	if c.HTTPClient == original {
+		t.Fatal("HTTPClient should be a different instance")
+	}
+
+	if c.HTTPClient.Timeout != 30*time.Second {
+		t.Fatalf("timeout = %v, want 30s", c.HTTPClient.Timeout)
+	}
+
+	if c.HTTPClient.Transport != transport {
+		t.Fatal("custom transport was not preserved")
 	}
 }
 
@@ -285,7 +326,7 @@ func TestWithHTTPTimeout_CreatesHTTPClientWhenNil(t *testing.T) {
 	}
 }
 
-func TestWithHTTPTimeout_UsesExistingHTTPClient(t *testing.T) {
+func TestWithHTTPTimeout_CopiesExistingHTTPClient(t *testing.T) {
 	t.Parallel()
 
 	hc := &http.Client{Timeout: 5 * time.Second}
@@ -298,11 +339,14 @@ func TestWithHTTPTimeout_UsesExistingHTTPClient(t *testing.T) {
 		t.Fatalf("WithHTTPTimeout() error = %v", err)
 	}
 
-	if c.HTTPClient != hc {
-		t.Fatal("HTTPClient pointer was replaced, want same client")
+	if c.HTTPClient == hc {
+		t.Fatal("HTTPClient pointer was not replaced")
 	}
 	if c.HTTPClient.Timeout != 2*time.Second {
-		t.Fatalf("HTTPClient.Timeout = %v, want %v", c.HTTPClient.Timeout, 2*time.Second)
+		t.Fatalf("HTTPClient.Timeout = %v, want 2s", c.HTTPClient.Timeout)
+	}
+	if hc.Timeout != 5*time.Second {
+		t.Fatalf("original HTTPClient.Timeout = %v, want 5s", hc.Timeout)
 	}
 }
 

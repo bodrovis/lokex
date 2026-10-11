@@ -97,6 +97,7 @@ func TestExtractRegularFileEntry(t *testing.T) {
 			root,
 			"out.txt",
 			zipx.DefaultPolicy(),
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractRegularFileEntry() error = nil, want non-nil")
@@ -141,6 +142,7 @@ func TestExtractRegularFileEntry(t *testing.T) {
 			root,
 			"out.txt",
 			zipx.DefaultPolicy(),
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractRegularFileEntry() error = nil, want non-nil")
@@ -183,6 +185,7 @@ func TestExtractRegularFileEntry(t *testing.T) {
 			root,
 			"out.txt",
 			zipx.Policy{MaxFileBytes: 3},
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractRegularFileEntry() error = nil, want non-nil")
@@ -245,6 +248,7 @@ func TestExtractRegularFileEntry(t *testing.T) {
 			root,
 			"out.txt",
 			zipx.DefaultPolicy(),
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractRegularFileEntry() error = nil, want non-nil")
@@ -299,6 +303,7 @@ func TestExtractRegularFileEntry(t *testing.T) {
 			root,
 			"out.txt",
 			zipx.DefaultPolicy(),
+			0,
 		)
 		if err != nil {
 			t.Fatalf(
@@ -352,7 +357,6 @@ func TestCreateTempOutputFile(t *testing.T) {
 		f, tmp, err := zipx.ExportCreateTempOutputFile(
 			root,
 			"out.txt",
-			0o644,
 		)
 		if err == nil {
 			t.Fatal("CreateTempOutputFile() error = nil, want non-nil")
@@ -383,7 +387,6 @@ func TestCreateTempOutputFile(t *testing.T) {
 		f, tmp, err := zipx.ExportCreateTempOutputFile(
 			root,
 			"out.txt",
-			0o644,
 		)
 		if err != nil {
 			t.Fatalf(

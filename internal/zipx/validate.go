@@ -7,9 +7,8 @@ import (
 	"io"
 )
 
-// Validate checks that zipPath can be opened as a ZIP archive.
-// Malformed or truncated ZIP data is reported as io.ErrUnexpectedEOF.
-// Other open and close errors are wrapped separately.
+// Validate checks whether zipPath can be opened as a ZIP archive.
+// It does not decompress entries or verify their checksums.
 func Validate(zipPath string) (err error) {
 	zr, err := openZipReader(zipPath)
 	if err != nil {

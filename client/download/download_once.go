@@ -35,6 +35,13 @@ func (d *Downloader) downloadOnce(
 		return apierr.Parse(slurp, resp.StatusCode)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf(
+			"download: unexpected HTTP status %d",
+			resp.StatusCode,
+		)
+	}
+
 	return writeHTTPBodyAtomically(
 		destPath,
 		resp.Body,
@@ -44,25 +51,29 @@ func (d *Downloader) downloadOnce(
 
 // downloadOncePrecheck validates inputs and extracts the http.Client.
 // Keeping this separate makes downloadOnce small and avoids nil-panics.
-func (d *Downloader) downloadOncePrecheck(ctx context.Context, urlStr, destPath string) (*http.Client, string, string, error) {
+
+func (d *Downloader) downloadOncePrecheck(
+	ctx context.Context,
+	urlStr, destPath string,
+) (*http.Client, string, string, error) {
 	if d == nil || d.client == nil || d.client.HTTPClient == nil {
 		return nil, "", "", fmt.Errorf("download: downloader/client/http client is nil")
 	}
 	if ctx == nil {
 		return nil, "", "", fmt.Errorf("download: nil context")
 	}
-	if cerr := ctx.Err(); cerr != nil {
-		return nil, "", "", cerr
+	if err := ctx.Err(); err != nil {
+		return nil, "", "", err
 	}
 
-	urlStr = strings.TrimSpace(urlStr)
-	destPath = strings.TrimSpace(destPath)
-	if urlStr == "" {
-		return nil, "", "", fmt.Errorf("download: empty url")
+	validURL, err := validateBundleURL(urlStr)
+	if err != nil {
+		return nil, "", "", err
 	}
-	if destPath == "" {
+
+	if strings.TrimSpace(destPath) == "" {
 		return nil, "", "", fmt.Errorf("download: empty dest path")
 	}
 
-	return d.client.HTTPClient, urlStr, destPath, nil
+	return d.client.HTTPClient, validURL, destPath, nil
 }

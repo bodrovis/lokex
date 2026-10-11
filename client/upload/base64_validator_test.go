@@ -91,6 +91,31 @@ func TestValidateAndNormalizeStdBase64String(t *testing.T) {
 			in:   "QUJDRA", // len%4=2 → add ==
 			want: "QUJDRA==",
 		},
+		{
+			name:    "non-canonical base64 with double padding",
+			in:      "Zh==",
+			wantErr: "upload: invalid base64 data:",
+		},
+		{
+			name:    "non-canonical base64 without double padding",
+			in:      "Zh",
+			wantErr: "upload: invalid base64 data:",
+		},
+		{
+			name:    "non-canonical base64 with single padding",
+			in:      "Zm9=",
+			wantErr: "upload: invalid base64 data:",
+		},
+		{
+			name:    "non-canonical base64 without single padding",
+			in:      "Zm9",
+			wantErr: "upload: invalid base64 data:",
+		},
+		{
+			name: "valid zero bytes",
+			in:   "AAAA",
+			want: "AAAA",
+		},
 	}
 
 	for _, tt := range tests {

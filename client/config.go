@@ -97,11 +97,21 @@ func WithHTTPTimeout(d time.Duration) Option {
 		if d < 0 {
 			return errors.New("http timeout cannot be negative")
 		}
+
 		if c.HTTPClient == nil {
-			c.HTTPClient = &http.Client{}
+			c.HTTPClient = &http.Client{Timeout: d}
+			return nil
 		}
 
-		c.HTTPClient.Timeout = d
+		original := c.HTTPClient
+
+		c.HTTPClient = &http.Client{
+			Transport:     original.Transport,
+			CheckRedirect: original.CheckRedirect,
+			Jar:           original.Jar,
+			Timeout:       d,
+		}
+
 		return nil
 	}
 }

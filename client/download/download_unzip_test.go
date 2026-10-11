@@ -92,8 +92,8 @@ func TestDownloadAndUnzip_EmptyURL(t *testing.T) {
 
 	dest := t.TempDir()
 	err := dl.DownloadAndUnzip(context.Background(), "   ", dest)
-	if err == nil || !strings.Contains(err.Error(), "empty bundle url") {
-		t.Fatalf("want empty bundle url error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "empty url") {
+		t.Fatalf("want empty url error, got %v", err)
 	}
 }
 
@@ -578,12 +578,13 @@ func TestDownloadAndUnzipPrecheck(t *testing.T) {
 
 		d := download.NewDownloader(cli)
 		destDir := t.TempDir()
+		wantDest := "  " + destDir + "  "
 
 		gotCtx, gotURL, gotDest, err := download.ExportDownloadAndUnzipPrecheck(
 			d,
 			nil,
 			"  https://example.com/bundle.zip  ",
-			"  "+destDir+"  ",
+			wantDest,
 		)
 		if err != nil {
 			t.Fatalf("DownloadAndUnzipPrecheck() unexpected error = %v", err)
@@ -595,10 +596,10 @@ func TestDownloadAndUnzipPrecheck(t *testing.T) {
 			t.Fatalf("context error = %v, want nil", gotCtx.Err())
 		}
 		if gotURL != "https://example.com/bundle.zip" {
-			t.Fatalf("url = %q, want %q", gotURL, "https://example.com/bundle.zip")
+			t.Fatalf("url = %q, want normalized URL", gotURL)
 		}
-		if gotDest != destDir {
-			t.Fatalf("dest = %q, want %q", gotDest, destDir)
+		if gotDest != wantDest {
+			t.Fatalf("dest = %q, want %q", gotDest, wantDest)
 		}
 	})
 }

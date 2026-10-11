@@ -237,37 +237,60 @@ func TestPollProcesses_Duplicates_DoNotSpamRequests(t *testing.T) {
 	}
 }
 
-func TestPollProcesses_NonRetryableError_MarksFailedAndContinues(t *testing.T) {
+func TestPollProcesses_NonRetryableError_PreservesStatusAndContinues(t *testing.T) {
 	srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/projects/p/processes/x":
-			// 404 is non-retryable -> should mark failed and stop polling x
+			// 404 is non-retryable: stop polling x and preserve the error.
 			http.NotFound(w, r)
+
 		case "/projects/p/processes/y":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"process":{"process_id":"y","status":"finished","message":"","details":{}}}`))
+
 		default:
 			http.NotFound(w, r)
 		}
 	}))
+	defer srv.Close()
 
 	c := newTestClient(t,
 		withServer(srv),
 		withProjectID("p"),
 	)
 
-	got, err := background.PollProcesses(context.Background(), []string{"x", "y"}, c)
+	got, err := background.PollProcesses(
+		context.Background(),
+		[]string{"x", "y"},
+		c,
+	)
 	if err != nil {
-		t.Fatalf("unexpected: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(got) != 2 {
 		t.Fatalf("len=%d, want 2; got=%#v", len(got), got)
 	}
-	if got[0].ProcessID != "x" || got[0].Status != background.StatusFailed {
-		t.Fatalf("x: got=%#v, want failed", got[0])
+
+	x := got[0]
+	if x.ProcessID != "x" {
+		t.Fatalf("x: process ID = %q, want x", x.ProcessID)
 	}
-	if got[1].ProcessID != "y" || got[1].Status != background.StatusFinished {
-		t.Fatalf("y: got=%#v, want finished", got[1])
+	if x.Status != background.StatusQueued {
+		t.Fatalf("x: status = %q, want queued", x.Status)
+	}
+	if x.Err == nil {
+		t.Fatal("x: expected polling error for HTTP 404")
+	}
+
+	y := got[1]
+	if y.ProcessID != "y" {
+		t.Fatalf("y: process ID = %q, want y", y.ProcessID)
+	}
+	if y.Status != background.StatusFinished {
+		t.Fatalf("y: status = %q, want finished", y.Status)
+	}
+	if y.Err != nil {
+		t.Fatalf("y: unexpected polling error: %v", y.Err)
 	}
 }
 
@@ -519,8 +542,23 @@ func withPollWait(initial, max time.Duration) testClientOption {
 	}
 }
 
+func TestNextPollWait_ExpiredDeadline(t *testing.T) {
+	got := background.ExportNextPollWait(
+		time.Second,
+		time.Now().Add(-time.Second),
+	)
+
+	if got != 0 {
+		t.Fatalf("NextPollWait() = %v, want 0", got)
+	}
+}
+
 func TestNextPollWait_NonPositiveFallsBackToMinimum(t *testing.T) {
-	got := background.ExportNextPollWait(time.Second, time.Now().Add(-time.Second))
+	got := background.ExportNextPollWait(
+		0,
+		time.Now().Add(time.Second),
+	)
+
 	want := 10 * time.Millisecond
 
 	if got != want {

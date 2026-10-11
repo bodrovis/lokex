@@ -5,7 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/bodrovis/lokex/v2/client/internal/background"
 )
@@ -123,17 +124,37 @@ func (u *Uploader) kickoffBatchUploads(
 	items []BatchUploadItem,
 	results []BatchUploadResultItem,
 ) {
-	sem := make(chan struct{}, batchUploadConcurrency)
-
-	var wg sync.WaitGroup
+	var g errgroup.Group
+	g.SetLimit(batchUploadConcurrency)
 
 	for i, item := range items {
-		wg.Go(func() {
-			u.kickoffBatchUploadItem(ctx, sem, item, &results[i])
+		g.Go(func() error {
+			if err := ctx.Err(); err != nil {
+				results[i].Err = err
+				return nil
+			}
+
+			processID, err := batchUploadSingleFn(
+				u,
+				ctx,
+				item.Params,
+				item.SrcPath,
+			)
+
+			processID = strings.TrimSpace(processID)
+
+			if err == nil && processID == "" {
+				err = ErrNoProcessID
+			}
+
+			results[i].ProcessID = processID
+			results[i].Err = err
+
+			return nil
 		})
 	}
 
-	wg.Wait()
+	_ = g.Wait()
 }
 
 func (u *Uploader) kickoffBatchUploadItem(
@@ -202,7 +223,7 @@ func applyPolledBatchResults(
 
 		seen[processID] = struct{}{}
 
-		_, err := handleProcessStatus(processID, p.Status, p.Message)
+		_, err := handleProcessResult(processID, p)
 		if err != nil {
 			markBatchItemError(results, indexes, err)
 		}

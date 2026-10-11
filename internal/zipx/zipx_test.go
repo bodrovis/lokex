@@ -192,8 +192,15 @@ func TestUnzip_MaxTotalBytes(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected total bytes cap error, got nil")
 	}
-	if !strings.Contains(err.Error(), "zip too large uncompressed") {
+	if !strings.Contains(err.Error(), "zip entry too big by header") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "a.bin")); err != nil {
+		t.Fatalf("first file should exist: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dst, "b.bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("second file should not exist: %v", err)
 	}
 }
 

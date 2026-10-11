@@ -1,6 +1,8 @@
 package zipx
 
 // Policy defines extraction limits and behavior.
+// Non-positive numeric limits disable the corresponding checks.
+// Use DefaultPolicy for safe default limits.
 type Policy struct {
 	MaxFiles      int   // maximum number of ZIP entries
 	MaxTotalBytes int64 // maximum total uncompressed bytes

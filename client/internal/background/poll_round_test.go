@@ -107,10 +107,17 @@ func TestApplyRound(t *testing.T) {
 		}
 	})
 
-	t.Run("non-retryable error marks process failed", func(t *testing.T) {
+	t.Run("non-retryable error preserves status", func(t *testing.T) {
 		t.Parallel()
 
-		processMap := map[string]background.QueuedProcess{}
+		pollErr := errors.New("bad request")
+
+		processMap := map[string]background.QueuedProcess{
+			"p1": {
+				ProcessID: "p1",
+				Status:    "running",
+			},
+		}
 		pending := map[string]struct{}{
 			"p1": {},
 		}
@@ -120,16 +127,20 @@ func TestApplyRound(t *testing.T) {
 			pending,
 			nil,
 			map[string]error{
-				"p1": errors.New("bad request"),
+				"p1": pollErr,
 			},
 		)
 
 		got := processMap["p1"]
-		if got.Status != background.StatusFailed {
-			t.Fatalf("status = %q, want %q", got.Status, background.StatusFailed)
-		}
+
 		if got.ProcessID != "p1" {
 			t.Fatalf("ProcessID = %q, want %q", got.ProcessID, "p1")
+		}
+		if got.Status != "running" {
+			t.Fatalf("status = %q, want running", got.Status)
+		}
+		if !errors.Is(got.Err, pollErr) {
+			t.Fatalf("Err = %v, want %v", got.Err, pollErr)
 		}
 		if _, ok := pending["p1"]; ok {
 			t.Fatal(`pending["p1"] still present`)

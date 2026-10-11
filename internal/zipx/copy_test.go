@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"math"
 	"strings"
 	"testing"
 
@@ -18,61 +19,100 @@ func (r errReader) Read(_ []byte) (int, error) {
 	return 0, r.err
 }
 
-func TestCopyCapped(t *testing.T) {
+func TestCopyWithLimit(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name       string
 		src        io.Reader
 		max        int64
+		enabled    bool
 		wantN      int64
 		wantErr    string
 		wantOutput string
 	}{
 		{
-			name:       "max positive within limit",
+			name:       "within limit",
 			src:        strings.NewReader("abc"),
-			max:        3,
+			max:        5,
+			enabled:    true,
 			wantN:      3,
 			wantOutput: "abc",
 		},
 		{
-			name:       "max positive exceeded",
+			name:       "exact limit",
+			src:        strings.NewReader("abc"),
+			max:        3,
+			enabled:    true,
+			wantN:      3,
+			wantOutput: "abc",
+		},
+		{
+			name:       "limit exceeded",
 			src:        strings.NewReader("abcd"),
 			max:        3,
-			wantN:      4,
+			enabled:    true,
+			wantN:      3,
 			wantErr:    "zip entry exceeds max size",
+			wantOutput: "abc",
+		},
+		{
+			name:       "zero limit empty input",
+			src:        strings.NewReader(""),
+			max:        0,
+			enabled:    true,
+			wantN:      0,
+			wantOutput: "",
+		},
+		{
+			name:       "zero limit exceeded",
+			src:        strings.NewReader("abc"),
+			max:        0,
+			enabled:    true,
+			wantN:      0,
+			wantErr:    "zip entry exceeds max size",
+			wantOutput: "",
+		},
+		{
+			name:       "disabled limit",
+			src:        strings.NewReader("abcd"),
+			max:        2,
+			enabled:    false,
+			wantN:      4,
 			wantOutput: "abcd",
 		},
 		{
-			name:       "copy error with max positive",
+			name:       "disabled zero limit",
+			src:        strings.NewReader("abc"),
+			max:        0,
+			enabled:    false,
+			wantN:      3,
+			wantOutput: "abc",
+		},
+		{
+			name:       "read error with limit",
 			src:        errReader{err: errors.New("read boom")},
 			max:        3,
+			enabled:    true,
 			wantN:      0,
 			wantErr:    "read boom",
 			wantOutput: "",
 		},
 		{
-			name:       "max zero uses plain copy",
-			src:        strings.NewReader("abc"),
-			max:        0,
-			wantN:      3,
-			wantOutput: "abc",
-		},
-		{
-			name:       "max negative uses plain copy",
-			src:        strings.NewReader("abcd"),
-			max:        -1,
-			wantN:      4,
-			wantOutput: "abcd",
-		},
-		{
-			name:       "plain copy error",
+			name:       "read error without limit",
 			src:        errReader{err: errors.New("plain boom")},
-			max:        -1,
+			enabled:    false,
 			wantN:      0,
 			wantErr:    "plain boom",
 			wantOutput: "",
+		},
+		{
+			name:       "max int64",
+			src:        strings.NewReader("abc"),
+			max:        math.MaxInt64,
+			enabled:    true,
+			wantN:      3,
+			wantOutput: "abc",
 		},
 	}
 
@@ -82,7 +122,12 @@ func TestCopyCapped(t *testing.T) {
 
 			var dst bytes.Buffer
 
-			gotN, err := zipx.ExportCopyCapped(&dst, tt.src, tt.max)
+			gotN, err := zipx.ExportCopyWithLimit(
+				&dst,
+				tt.src,
+				tt.max,
+				tt.enabled,
+			)
 
 			if gotN != tt.wantN {
 				t.Fatalf("n = %d, want %d", gotN, tt.wantN)

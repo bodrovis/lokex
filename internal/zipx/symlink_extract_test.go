@@ -121,7 +121,11 @@ func TestReadSymlinkTarget(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		_, err := zipx.ExportReadSymlinkTarget(f)
+		_, _, err := zipx.ExportReadSymlinkTarget(
+			f,
+			zipx.DefaultPolicy(),
+			0,
+		)
 		if err == nil {
 			t.Fatal("ReadSymlinkTarget() error = nil, want non-nil")
 		}
@@ -150,7 +154,11 @@ func TestReadSymlinkTarget(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		_, err := zipx.ExportReadSymlinkTarget(f)
+		_, _, err := zipx.ExportReadSymlinkTarget(
+			f,
+			zipx.DefaultPolicy(),
+			0,
+		)
 		if err == nil {
 			t.Fatal("ReadSymlinkTarget() error = nil, want non-nil")
 		}
@@ -176,12 +184,12 @@ func TestReadSymlinkTarget(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		_, err := zipx.ExportReadSymlinkTarget(f)
+		_, _, err := zipx.ExportReadSymlinkTarget(f, zipx.DefaultPolicy(), 0)
 		if err == nil {
 			t.Fatal("ReadSymlinkTarget() error = nil, want non-nil")
 		}
 
-		if err.Error() != "symlink target too large" {
+		if err.Error() != "symlink target exceeds size limit" {
 			t.Fatalf(
 				"error = %q, want %q",
 				err.Error(),
@@ -202,32 +210,30 @@ func TestReadSymlinkTarget(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		got, err := zipx.ExportReadSymlinkTarget(f)
+		got, n, err := zipx.ExportReadSymlinkTarget(f, zipx.DefaultPolicy(), 0)
 		if err != nil {
-			t.Fatalf(
-				"ReadSymlinkTarget() unexpected error = %v",
-				err,
-			)
+			t.Fatalf("ReadSymlinkTarget() unexpected error = %v", err)
 		}
 
 		if len(got) != 1<<20 {
-			t.Fatalf(
-				"len(target) = %d, want %d",
-				len(got),
-				1<<20,
-			)
+			t.Fatalf("len(target) = %d, want %d", len(got), 1<<20)
+		}
+
+		if n != 1<<20 {
+			t.Fatalf("n = %d, want %d", n, 1<<20)
 		}
 	})
 
-	t.Run("trims whitespace", func(t *testing.T) {
+	t.Run("preserves whitespace", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		zipPath := filepath.Join(tmpDir, "a.zip")
 
+		target := " \n\t target.txt \r\n"
 		makeZipWithEntry(
 			t,
 			zipPath,
 			"link",
-			[]byte(" \n\t target.txt \r\n"),
+			[]byte(target),
 		)
 
 		zr, f := openFirstZipFile(t, zipPath)
@@ -235,20 +241,21 @@ func TestReadSymlinkTarget(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		got, err := zipx.ExportReadSymlinkTarget(f)
+		got, n, err := zipx.ExportReadSymlinkTarget(
+			f,
+			zipx.DefaultPolicy(),
+			0,
+		)
 		if err != nil {
-			t.Fatalf(
-				"ReadSymlinkTarget() unexpected error = %v",
-				err,
-			)
+			t.Fatalf("ReadSymlinkTarget() unexpected error = %v", err)
 		}
 
-		if got != "target.txt" {
-			t.Fatalf(
-				"target = %q, want %q",
-				got,
-				"target.txt",
-			)
+		if got != target {
+			t.Fatalf("target = %q, want %q", got, target)
+		}
+
+		if n != int64(len(target)) {
+			t.Fatalf("n = %d, want %d", n, len(target))
 		}
 	})
 
@@ -268,7 +275,7 @@ func TestReadSymlinkTarget(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		got, err := zipx.ExportReadSymlinkTarget(f)
+		got, n, err := zipx.ExportReadSymlinkTarget(f, zipx.DefaultPolicy(), 0)
 		if err != nil {
 			t.Fatalf(
 				"ReadSymlinkTarget() unexpected error = %v",
@@ -282,6 +289,10 @@ func TestReadSymlinkTarget(t *testing.T) {
 				got,
 				"dir/file.txt",
 			)
+		}
+
+		if n != int64(len("dir/file.txt")) {
+			t.Fatalf("n = %d, want %d", n, len("dir/file.txt"))
 		}
 	})
 }
@@ -405,17 +416,22 @@ func TestExtractSymlinkEntry(t *testing.T) {
 		)
 		defer restore()
 
-		err = zipx.ExportExtractSymlinkEntry(
+		n, err := zipx.ExportExtractSymlinkEntry(
 			f,
 			root,
 			"link",
 			zipx.Policy{AllowSymlinks: false},
+			0,
 		)
 		if err != nil {
 			t.Fatalf(
 				"ExtractSymlinkEntry() unexpected error = %v",
 				err,
 			)
+		}
+
+		if n != 0 {
+			t.Fatalf("n = %d, want 0", n)
 		}
 
 		if called {
@@ -447,12 +463,18 @@ func TestExtractSymlinkEntry(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		err = zipx.ExportExtractSymlinkEntry(
+		n, err := zipx.ExportExtractSymlinkEntry(
 			f,
 			root,
 			"link",
 			zipx.Policy{AllowSymlinks: true},
+			0,
 		)
+
+		if n != 0 {
+			t.Fatalf("n = %d, want 0", n)
+		}
+
 		if err == nil {
 			t.Fatal("ExtractSymlinkEntry() error = nil, want non-nil")
 		}
@@ -484,14 +506,19 @@ func TestExtractSymlinkEntry(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		err = zipx.ExportExtractSymlinkEntry(
+		n, err := zipx.ExportExtractSymlinkEntry(
 			f,
 			root,
 			"link",
 			zipx.Policy{AllowSymlinks: true},
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractSymlinkEntry() error = nil, want non-nil")
+		}
+
+		if n != 0 {
+			t.Fatalf("n = %d, want 0", n)
 		}
 
 		if !strings.Contains(
@@ -529,14 +556,19 @@ func TestExtractSymlinkEntry(t *testing.T) {
 			_ = zr.Close()
 		}()
 
-		err = zipx.ExportExtractSymlinkEntry(
+		n, err := zipx.ExportExtractSymlinkEntry(
 			f,
 			root,
 			filepath.Join("dir", "link"),
 			zipx.Policy{AllowSymlinks: true},
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractSymlinkEntry() error = nil, want non-nil")
+		}
+
+		if n != 0 {
+			t.Fatalf("n = %d, want 0", n)
 		}
 
 		if !strings.Contains(
@@ -581,14 +613,19 @@ func TestExtractSymlinkEntry(t *testing.T) {
 		)
 		defer restore()
 
-		err = zipx.ExportExtractSymlinkEntry(
+		n, err := zipx.ExportExtractSymlinkEntry(
 			f,
 			root,
 			"link",
 			zipx.Policy{AllowSymlinks: true},
+			0,
 		)
 		if err == nil {
 			t.Fatal("ExtractSymlinkEntry() error = nil, want non-nil")
+		}
+
+		if n != 0 {
+			t.Fatalf("n = %d, want 0", n)
 		}
 
 		if err.Error() != "create symlink: symlink boom" {
@@ -600,36 +637,35 @@ func TestExtractSymlinkEntry(t *testing.T) {
 		}
 	})
 
-	t.Run("success removes existing entry and creates symlink", func(t *testing.T) {
+	t.Run("success creates symlink", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		root, err := os.OpenRoot(tmpDir)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		defer func() {
-			_ = root.Close()
+			if err := root.Close(); err != nil {
+				t.Errorf("close root: %v", err)
+			}
 		}()
 
-		if err := root.WriteFile(
-			"link",
-			[]byte("old"),
-			0o644,
-		); err != nil {
-			t.Fatal(err)
-		}
-
 		zipPath := filepath.Join(tmpDir, "a.zip")
+		target := " target.txt \n"
+
 		makeZipWithEntry(
 			t,
 			zipPath,
 			"link",
-			[]byte(" target.txt \n"),
+			[]byte(target),
 		)
 
 		zr, f := openFirstZipFile(t, zipPath)
 		defer func() {
-			_ = zr.Close()
+			if err := zr.Close(); err != nil {
+				t.Errorf("close zip: %v", err)
+			}
 		}()
 
 		var gotTarget string
@@ -644,40 +680,92 @@ func TestExtractSymlinkEntry(t *testing.T) {
 		)
 		defer restore()
 
-		err = zipx.ExportExtractSymlinkEntry(
+		n, err := zipx.ExportExtractSymlinkEntry(
 			f,
 			root,
 			"link",
 			zipx.Policy{AllowSymlinks: true},
+			0,
 		)
 		if err != nil {
-			t.Fatalf(
-				"ExtractSymlinkEntry() unexpected error = %v",
-				err,
-			)
+			t.Fatalf("ExtractSymlinkEntry() unexpected error = %v", err)
 		}
 
-		if _, err := root.Lstat("link"); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf(
-				"existing entry was not removed: Lstat() error = %v",
-				err,
-			)
+		if n != int64(len(target)) {
+			t.Fatalf("n = %d, want %d", n, len(target))
 		}
 
-		if gotTarget != "target.txt" {
-			t.Fatalf(
-				"symlink target = %q, want %q",
-				gotTarget,
-				"target.txt",
-			)
+		if gotTarget != target {
+			t.Fatalf("symlink target = %q, want %q", gotTarget, target)
 		}
 
 		if gotName != "link" {
-			t.Fatalf(
-				"symlink name = %q, want %q",
-				gotName,
-				"link",
-			)
+			t.Fatalf("symlink name = %q, want %q", gotName, "link")
+		}
+	})
+	t.Run("existing entry is preserved", func(t *testing.T) {
+		tmpDir := t.TempDir()
+
+		root, err := os.OpenRoot(tmpDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := root.Close(); err != nil {
+				t.Errorf("close root: %v", err)
+			}
+		}()
+
+		if err := root.WriteFile("link", []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		zipPath := filepath.Join(tmpDir, "a.zip")
+		makeZipWithEntry(t, zipPath, "link", []byte("target.txt"))
+
+		zr, f := openFirstZipFile(t, zipPath)
+		defer func() {
+			if err := zr.Close(); err != nil {
+				t.Errorf("close zip: %v", err)
+			}
+		}()
+
+		restore := zipx.ExportSetSymlinkForTest(
+			func(root *os.Root, _, name string) error {
+				// Emulate the collision behavior of os.Root.Symlink.
+				if _, err := root.Lstat(name); err == nil {
+					return os.ErrExist
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				return nil
+			},
+		)
+		defer restore()
+
+		n, err := zipx.ExportExtractSymlinkEntry(
+			f,
+			root,
+			"link",
+			zipx.Policy{AllowSymlinks: true},
+			0,
+		)
+
+		if !errors.Is(err, os.ErrExist) {
+			t.Fatalf("error = %v, want os.ErrExist", err)
+		}
+
+		if n != 0 {
+			t.Fatalf("n = %d, want 0", n)
+		}
+
+		data, err := root.ReadFile("link")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if string(data) != "old" {
+			t.Fatalf("existing file = %q, want %q", data, "old")
 		}
 	})
 }

@@ -1,7 +1,9 @@
 package upload
 
 import (
+	"encoding/base64"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -20,7 +22,23 @@ func validateAndNormalizeStdBase64String(s string) (string, error) {
 		return "", err
 	}
 
-	return normalizeStdBase64Padding(s, pad)
+	s, err = normalizeStdBase64Padding(s, pad)
+	if err != nil {
+		return "", err
+	}
+
+	_, err = io.Copy(
+		io.Discard,
+		base64.NewDecoder(
+			base64.StdEncoding.Strict(),
+			strings.NewReader(s),
+		),
+	)
+	if err != nil {
+		return "", fmt.Errorf("upload: invalid base64 data: %w", err)
+	}
+
+	return s, nil
 }
 
 func validateStdBase64Length(s string) error {

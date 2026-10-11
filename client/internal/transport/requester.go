@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/bodrovis/lokex/v2/internal/apierr"
 )
@@ -43,16 +44,19 @@ func (r *Requester) do(
 	v any,
 	headers http.Header,
 ) error {
+	if r.HTTPClient == nil {
+		if closer, ok := body.(io.Closer); ok {
+			_ = closer.Close()
+		}
+		return fmt.Errorf("send request: nil http client")
+	}
+
 	req, err := r.newRequest(ctx, method, path, body, headers)
 	if err != nil {
 		return err
 	}
 
-	if r.HTTPClient == nil {
-		return fmt.Errorf("send request: nil http client")
-	}
-
-	resp, err := r.HTTPClient.Do(req)
+	resp, err := clientWithSafeRedirects(r.HTTPClient).Do(req)
 	if err != nil {
 		// after Do() net/http already handled closing the request body.
 		return fmt.Errorf("send request: %w", err)
@@ -146,4 +150,35 @@ func decodeJSONResponse(resp *http.Response, v any) error {
 	}
 
 	return nil
+}
+
+func clientWithSafeRedirects(hc *http.Client) *http.Client {
+	cloned := *hc
+	previous := hc.CheckRedirect
+
+	cloned.CheckRedirect = func(
+		req *http.Request,
+		via []*http.Request,
+	) error {
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+
+		original := via[0].URL
+		target := req.URL
+
+		if original.Scheme != target.Scheme ||
+			!strings.EqualFold(original.Hostname(), target.Hostname()) ||
+			original.Port() != target.Port() {
+			return errors.New("cross-origin redirect refused")
+		}
+
+		if previous != nil {
+			return previous(req, via)
+		}
+
+		return nil
+	}
+
+	return &cloned
 }

@@ -129,11 +129,11 @@ func computeRetryDelay(backoff, maxBackoff time.Duration) time.Duration {
 }
 
 func nextBackoff(backoff, maxBackoff time.Duration) time.Duration {
-	backoff *= 2
-	if backoff > maxBackoff {
+	if backoff >= maxBackoff || backoff > maxBackoff-backoff {
 		return maxBackoff
 	}
-	return backoff
+
+	return backoff * 2
 }
 
 func wrapErr(label string, attempt, total int, err error) error {

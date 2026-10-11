@@ -14,6 +14,7 @@ func extractRegularFileEntry(
 	root *os.Root,
 	rel string,
 	p Policy,
+	limit byteLimit,
 ) (int64, error) {
 	rc, err := f.Open()
 	if err != nil {
@@ -22,13 +23,18 @@ func extractRegularFileEntry(
 
 	perm := filePermOrDefault(f.Mode())
 
-	tmpf, tmp, err := createTempOutputFile(root, rel, perm)
+	tmpf, tmp, err := createTempOutputFile(root, rel)
 	if err != nil {
 		_ = rc.Close()
 		return 0, err
 	}
 
-	n, werr := copyCapped(tmpf, rc, p.MaxFileBytes)
+	n, werr := copyWithLimit(tmpf, rc, limit)
+
+	if werr == nil {
+		werr = tmpf.Chmod(perm)
+	}
+
 	werr = closeWithPrecedence(werr, tmpf, rc)
 
 	if werr != nil {
@@ -61,7 +67,6 @@ func filePermOrDefault(mode os.FileMode) os.FileMode {
 func createTempOutputFile(
 	root *os.Root,
 	rel string,
-	perm os.FileMode,
 ) (*os.File, string, error) {
 	tmp := filepath.Join(
 		filepath.Dir(rel),
@@ -70,15 +75,12 @@ func createTempOutputFile(
 
 	tmpf, err := root.OpenFile(
 		tmp,
-		os.O_RDWR|os.O_CREATE|os.O_EXCL,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
 		0o600,
 	)
 	if err != nil {
 		return nil, "", err
 	}
-
-	// Match the previous CreateTemp + Chmod behavior.
-	_ = tmpf.Chmod(perm)
 
 	return tmpf, tmp, nil
 }

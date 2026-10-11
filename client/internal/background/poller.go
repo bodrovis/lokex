@@ -2,6 +2,7 @@ package background
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/bodrovis/lokex/v2/client"
@@ -9,9 +10,10 @@ import (
 )
 
 const (
-	StatusQueued   = "queued"
-	StatusFinished = "finished"
-	StatusFailed   = "failed"
+	StatusQueued    = "queued"
+	StatusFinished  = "finished"
+	StatusFailed    = "failed"
+	StatusCancelled = "cancelled"
 )
 
 type pollResult struct {
@@ -35,6 +37,12 @@ func PollProcesses(
 ) ([]QueuedProcess, error) {
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, errors.New("background: nil client")
 	}
 
 	wait, deadline, pollCtx, cancel := newPollContext(ctx, c)
@@ -154,12 +162,11 @@ func nextSleepWait(
 		return 0, false
 	}
 
-	sleep := min(wait, remaining)
-	if sleep <= 0 {
-		sleep = 10 * time.Millisecond
+	if wait <= 0 {
+		wait = 10 * time.Millisecond
 	}
 
-	return sleep, true
+	return min(wait, remaining), true
 }
 
 func sleepBetweenPollRounds(
@@ -179,16 +186,19 @@ func sleepBetweenPollRounds(
 	return false, nil
 }
 
-func nextPollWait(
-	wait time.Duration,
-	deadline time.Time,
-) time.Duration {
+func nextPollWait(wait time.Duration, deadline time.Time) time.Duration {
 	remaining := time.Until(deadline)
-	next := min(wait*2, remaining)
-
-	if next <= 0 {
-		next = 10 * time.Millisecond
+	if remaining <= 0 {
+		return 0
 	}
 
-	return next
+	if wait <= 0 {
+		return min(10*time.Millisecond, remaining)
+	}
+
+	if wait >= remaining/2 {
+		return remaining
+	}
+
+	return wait * 2
 }
