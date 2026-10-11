@@ -37,30 +37,30 @@ func getNumberAsInt(m map[string]any, key string) (int, bool) {
 		return 0, false
 	}
 
+	return valueAsInt(v)
+}
+
+func valueAsInt(v any) (int, bool) {
 	switch n := v.(type) {
-	case float64:
-		if n != math.Trunc(n) {
-			return 0, false
-		}
-
-		i, err := strconv.Atoi(strconv.FormatFloat(n, 'f', -1, 64))
-		if err != nil {
-			return 0, false
-		}
-
-		return i, true
-
 	case int:
 		return n, true
 
 	case string:
 		i, err := strconv.Atoi(strings.TrimSpace(n))
-		if err != nil {
-			return 0, false
-		}
+		return i, err == nil
 
-		return i, true
+	case float64:
+		return floatAsInt(n)
 	}
 
 	return 0, false
+}
+
+func floatAsInt(n float64) (int, bool) {
+	if n != math.Trunc(n) {
+		return 0, false
+	}
+
+	i, err := strconv.Atoi(strconv.FormatFloat(n, 'f', -1, 64))
+	return i, err == nil
 }
