@@ -38,8 +38,8 @@ func TestNewClient_Defaults(t *testing.T) {
 	if c.BaseURL != "https://api.lokalise.com/api2/" {
 		t.Fatalf("BaseURL = %q, want %q", c.BaseURL, "https://api.lokalise.com/api2/")
 	}
-	if c.UserAgent != "lokex/2.4.1" {
-		t.Fatalf("UserAgent = %q, want %q", c.UserAgent, "lokex/2.4.1")
+	if c.UserAgent != "lokex/2.4.2" {
+		t.Fatalf("UserAgent = %q, want %q", c.UserAgent, "lokex/2.4.2")
 	}
 	if c.HTTPClient == nil {
 		t.Fatal("HTTPClient = nil, want non-nil")
