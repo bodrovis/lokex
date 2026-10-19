@@ -17,13 +17,18 @@ var markerFiles = []string{"go.mod", ".git"} // treat either as repo root
 
 // FindProjectRoot returns the nearest dir (starting at startDir) that contains a marker (go.mod/.git).
 func FindProjectRoot(startDir string) (string, error) {
-	dir := startDir
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", err
+	}
+
 	for {
-		for _, m := range markerFiles {
-			if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+		for _, marker := range markerFiles {
+			if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
 				return dir, nil
 			}
 		}
+
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			return "", os.ErrNotExist

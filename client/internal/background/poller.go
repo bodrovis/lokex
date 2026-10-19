@@ -79,6 +79,7 @@ func pollUntilDone(
 ) error {
 	const maxConcurrent = 6
 
+	// Reuse a single stopped timer across polling rounds.
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
 	defer timer.Stop()
